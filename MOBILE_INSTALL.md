@@ -53,7 +53,7 @@ Android 版 TauriTavern 的数据根在外部应用目录，可以直接把文�
 2. 确认电脑能识别设备：`adb devices`
 3. 把扩展文件夹推送到手机的全局扩展目录：
    ```bash
-   adb push "I:/Portable/Tauritavern-dev/dist/chat-tree-explorer" \
+   adb push "<本地路径>/chat-tree-explorer" \
      /sdcard/Android/data/com.tauritavern.client/files/data/extensions/third-party/
    ```
    推送后应得到：
