@@ -1,0 +1,11 @@
+{
+    "display_name": "聊天分支树 (Chat Tree Explorer)",
+    "loading_order": 60,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "TauriTavern Local",
+    "version": "1.0.0",
+    "description": "把某个角色卡的所有聊天记录合并成一棵分支树：相同上文折叠为共享主干，不同选择分叉为支线，每次生成的 swipe 变成可切换的变体。"
+}
