@@ -14,7 +14,17 @@
 
 ## 安装
 
-把整个 `chat-tree-explorer` 文件夹放到以下任一位置：
+**推荐：在酒馆的扩展面板里直接安装**
+
+在「扩展 → Install extension / 安装扩展」中粘贴：
+
+```
+https://github.com/996059396/chat-tree-explorer
+```
+
+手机端的其他安装方式（局域网同步、Android USB 拷贝）见 [MOBILE_INSTALL.md](MOBILE_INSTALL.md)。
+
+**手动安装**：把整个 `chat-tree-explorer` 文件夹放到以下任一位置：
 
 - 全局：`data/extensions/third-party/chat-tree-explorer/`
 - 当前用户：`data/default-user/extensions/chat-tree-explorer/`

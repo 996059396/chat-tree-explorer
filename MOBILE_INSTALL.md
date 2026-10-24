@@ -30,18 +30,24 @@
 
 ---
 
-## 方法 B：Git 仓库 URL 安装（需要把扩展放到一个可访问的 Git 仓库）
+## 方法 B：Git 仓库 URL 安装（已发布，推荐）
 
-这是酒馆自带的安装方式，手机和电脑都能用，之后还能一键检查更新。
+扩展已发布到公开仓库（无需登录，代码里不含任何聊天内容）：
 
-1. 把 `chat-tree-explorer` 目录作为一个 Git 仓库发布（GitHub / Gitee 等匿名可访问的 http(s) 地址；应用目前不支持私有仓库认证）。
-2. 在手机的 **扩展** 面板点 **Install extension / 安装扩展**，粘贴仓库地址，例如：
-   ```
-   https://github.com/<你的账号>/chat-tree-explorer
-   ```
-3. 安装完成后重启应用。
+```
+https://github.com/996059396/chat-tree-explorer
+```
 
-> 本目录已经初始化好一个本地 Git 仓库并提交了 `1.0.0`。如果需要我代为发布到一个公开的 GitHub 仓库，告诉我 GitHub 账号即可（代码不含任何聊天内容）。
+Android 手机上的步骤：
+
+1. 打开 TauriTavern，进入 **扩展（Extensions）** 面板。
+2. 点 **Install extension / 安装扩展**。
+3. 粘贴上面的仓库地址，确认安装（全局 global 或当前用户 local 都可以）。
+4. 等待 Git 克隆完成。如果提示安装成功但列表里还没有，**完全退出并重新打开** TauriTavern。
+5. 在扩展列表里确认 **聊天分支树 (Chat Tree Explorer)** 处于启用状态。
+6. 点魔棒菜单里的 **聊天分支树**，或在输入框执行 `/chattree`。
+
+**如果手机网络打不开 GitHub**：可以在手机浏览器里把仓库导入到 Gitee 等国内 Git 服务（或让电脑帮忙镜像一个仓库），然后把 Gitee 的 https 地址填进安装框；也可以改用方法 A 局域网同步。
 
 ---
 
