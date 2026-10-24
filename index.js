@@ -13,6 +13,9 @@
  */
 
 import { buildChatTree, parseChatPayload, normalizeForCompare, clearFingerprintCache } from './tree-core.js';
+import { buildSpatialModel } from './spatial-layout.js';
+import { SpatialView } from './spatial-view.js';
+import { plainTextForDisplay } from './spatial-text.js';
 
 const EXT_ID = 'chat-tree-explorer';
 const STORAGE_KEY = 'chat-tree-explorer:settings:v1';
@@ -27,6 +30,12 @@ const DEFAULT_SETTINGS = {
     activeVariantOnly: false,
     branchOrder: 'recent',
     showColors: true,
+    viewMode: 'spatial',
+    spatialHideStructured: true,
+    spatialHideSystem: true,
+    spatialShowAnchors: true,
+    spatialShowAllStrands: false,
+    spatialAutoRotate: false,
 };
 
 const state = {
@@ -53,6 +62,10 @@ const state = {
     fileLoadController: null,
     loadToken: 0,
     loadSeq: 0,
+    spatial: null,
+    spatialModel: null,
+    focusChatKey: null,
+    expandedSegments: new Set(),
     rebuildTimer: null,
     searchTimer: null,
     settings: loadSettings(),
@@ -100,6 +113,12 @@ function loadSettings() {
         merged.activeVariantOnly = Boolean(merged.activeVariantOnly);
         merged.showColors = Boolean(merged.showColors);
         merged.branchOrder = merged.branchOrder === 'oldest' ? 'oldest' : 'recent';
+        merged.viewMode = merged.viewMode === 'tree' ? 'tree' : 'spatial';
+        merged.spatialHideStructured = Boolean(merged.spatialHideStructured);
+        merged.spatialHideSystem = Boolean(merged.spatialHideSystem);
+        merged.spatialShowAnchors = Boolean(merged.spatialShowAnchors);
+        merged.spatialShowAllStrands = Boolean(merged.spatialShowAllStrands);
+        merged.spatialAutoRotate = Boolean(merged.spatialAutoRotate);
 
         return merged;
     } catch {
@@ -300,8 +319,149 @@ async function loadChatFile(character, chat, signal) {
  * Resolve branch lineage (chat → main chat) so branches can be grouped and
  * coloured by their root conversation.
  */
+const CJK_STOP_BIGRAMS = new Set([
+    '的是', '一个', '我们', '你们', '他们', '这个', '那个', '什么', '怎么', '没有',
+    '可以', '就是', '因为', '所以', '但是', '如果', '然后', '现在', '这样', '那样',
+    '知道', '觉得', '时候', '已经', '还是', '只是', '不是', '不能', '不会', '一起',
+    '这里', '那里', '起来', '出来', '过来', '下去', '一下', '有点', '自己', '其实',
+    '真的', '不过', '而且', '或者', '虽然', '于是', '开始', '继续', '看到', '听见',
+    '说道', '看着', '看着', '身边', '面前', '心中', '似乎', '仿佛', '突然', '立刻',
+]);
+
+const LATIN_STOPWORDS = new Set([
+    'the', 'and', 'you', 'that', 'was', 'for', 'are', 'with', 'his', 'her', 'she',
+    'him', 'they', 'them', 'this', 'have', 'from', 'not', 'but', 'what', 'when',
+    'your', 'just', 'like', 'very', 'will', 'would', 'could', 'should', 'there',
+    'their', 'about', 'into', 'then', 'than', 'been', 'were', 'said', 'says',
+]);
+
+function hashText(text) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return hash >>> 0;
+}
+
+function signatureTokens(text) {
+    const normalized = normalizeForCompare(text).slice(0, 6000);
+    const tokens = new Set();
+    for (const word of normalized.match(/[a-z0-9_]{2,}/g) || []) {
+        if (word.length <= 24 && !LATIN_STOPWORDS.has(word)) {
+            tokens.add(word);
+        }
+    }
+    for (const run of normalized.match(/[\p{Script=Han}]{2,}/gu) || []) {
+        const chars = Array.from(run);
+        for (let index = 0; index + 1 < chars.length; index++) {
+            const bigram = chars[index] + chars[index + 1];
+            if (!CJK_STOP_BIGRAMS.has(bigram)) {
+                tokens.add(bigram);
+            }
+        }
+    }
+    return tokens;
+}
+
+/**
+ * Per-chat recognition signature: distinctive tokens, a message barcode and
+ * the first/last user + final message snippets. Real corpora show that most
+ * chats share their greeting and even their last user turn, so a single
+ * "unique message" anchor is not enough; the signature combines several cues.
+ */
+function computeChatSignatures() {
+    const perChat = [];
+    const documentFrequency = new Map();
+
+    for (const chat of state.chatList) {
+        const parsed = state.parsed.get(chat.file);
+        if (!parsed) {
+            continue;
+        }
+        const messages = parsed.messages.filter((message) => message.role !== 'system');
+        const tokenCounts = new Map();
+        for (const message of messages) {
+            if (message.role !== 'user') {
+                continue;
+            }
+            const tokens = signatureTokens(message.mes);
+            for (const token of tokens) {
+                tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
+            }
+        }
+        const tokenSet = new Set(tokenCounts.keys());
+        for (const token of tokenSet) {
+            documentFrequency.set(token, (documentFrequency.get(token) || 0) + 1);
+        }
+
+        const dialogue = messages.filter((message) => message.role === 'user' || message.role === 'assistant');
+        const step = Math.max(1, Math.floor(dialogue.length / 14));
+        const barcode = [];
+        for (let index = 0; index < dialogue.length && barcode.length < 14; index += step) {
+            const message = dialogue[index];
+            const text = plainTextForDisplay(message.mes);
+            barcode.push({
+                role: message.role,
+                hue: hashText(text) % 360,
+                ratio: Math.min(1, Math.max(0.05, text.length / 1500)),
+            });
+        }
+
+        const firstUser = messages.find((message) => message.role === 'user');
+        let lastUser = null;
+        let lastMessage = null;
+        for (const message of messages) {
+            if (message.role === 'user') {
+                lastUser = message;
+            }
+            if (message.role !== 'system') {
+                lastMessage = message;
+            }
+        }
+
+        perChat.push({
+            file: chat.file,
+            tokenCounts,
+            tokenSet,
+            barcode,
+            firstUser: plainTextForDisplay(firstUser?.mes, 220),
+            lastUser: plainTextForDisplay(lastUser?.mes, 220),
+            lastMessage: plainTextForDisplay(lastMessage?.mes, 220),
+            lastMessageRole: lastMessage?.role || 'assistant',
+        });
+    }
+
+    const chatCount = Math.max(1, perChat.length);
+    const rareDf = Math.max(2, Math.ceil(chatCount * 0.06));
+    const result = new Map();
+
+    for (const entry of perChat) {
+        const scored = [];
+        for (const [token, count] of entry.tokenCounts) {
+            const df = documentFrequency.get(token) || 1;
+            if (df > rareDf || count < 2 || token.length < 2) {
+                continue;
+            }
+            const score = count * (df <= 2 ? 3 : df <= 4 ? 2 : 1) / (1 + Math.log(1 + df));
+            scored.push({ token, score, count, df });
+        }
+        scored.sort((a, b) => b.score - a.score || a.df - b.df || b.count - a.count);
+        result.set(entry.file, {
+            keywords: scored.slice(0, 3).map((item) => item.token),
+            barcode: entry.barcode,
+            firstUser: entry.firstUser,
+            lastUser: entry.lastUser,
+            lastMessage: entry.lastMessage,
+            lastMessageRole: entry.lastMessageRole,
+        });
+    }
+    return result;
+}
+
 function computeChatInfo() {
     const info = new Map();
+    const signatures = computeChatSignatures();
     const byBase = new Map();
 
     for (const chat of state.chatList) {
@@ -361,9 +521,16 @@ function computeChatInfo() {
         const { root, depth } = lineage.get(base) || { root: base, depth: 0 };
         const hue = hueOf.get(root) ?? 0;
         info.set(chat.file, {
+            ...(signatures.get(chat.file) || {}),
             base,
+            file: chat.file,
+            name: base,
             root,
             depth,
+            hue,
+            date: chat.date,
+            dateLabel: formatDate(chat.date),
+            messages: chat.messages,
             color: `hsl(${hue.toFixed(1)} 60% ${(56 + Math.min(depth, 4) * 5).toFixed(1)}%)`,
             rootColor: `hsl(${hue.toFixed(1)} 60% 56%)`,
         });
@@ -387,8 +554,18 @@ function buildOverlay() {
             <header class="ctv-header">
                 <button class="ctv-icon-btn ctv-sidebar-toggle" title="聊天与选项" aria-label="聊天与选项"><i class="fa-solid fa-bars"></i></button>
                 <div class="ctv-brand"><i class="fa-solid fa-sitemap"></i><span>聊天分支树</span></div>
+                <div class="ctv-view-switch" role="tablist" aria-label="视图切换">
+                    <button class="ctv-view-btn" data-view="spatial" role="tab">⌘ 空间</button>
+                    <button class="ctv-view-btn" data-view="tree" role="tab">☰ 树</button>
+                </div>
                 <select class="ctv-select ctv-character" aria-label="选择角色卡"></select>
+                <div class="ctv-focus-chip ctv-hidden">
+                    <i class="ctv-dot"></i>
+                    <span class="ctv-focus-name"></span>
+                    <button class="ctv-focus-clear" title="取消聚焦">×</button>
+                </div>
                 <div class="ctv-header-spacer"></div>
+                <button class="ctv-icon-btn ctv-reset-camera" title="重置空间视角" aria-label="重置空间视角"><i class="fa-solid fa-compass"></i></button>
                 <button class="ctv-icon-btn ctv-reload" title="重新读取磁盘数据" aria-label="重新读取"><i class="fa-solid fa-rotate"></i></button>
                 <button class="ctv-icon-btn ctv-close" title="关闭 (Esc)" aria-label="关闭"><i class="fa-solid fa-xmark"></i></button>
             </header>
@@ -429,6 +606,16 @@ function buildOverlay() {
                                 <option value="oldest">最早出现</option>
                             </select>
                         </label>
+                        <div class="ctv-option-group-title">空间视图</div>
+                        <label class="ctv-option"><input type="checkbox" data-option="spatialHideStructured" /> <span>隐藏预设 / 结构化消息</span></label>
+                        <label class="ctv-option"><input type="checkbox" data-option="spatialHideSystem" /> <span>隐藏系统消息</span></label>
+                        <label class="ctv-option"><input type="checkbox" data-option="spatialShowAnchors" /> <span>显示聊天锚点</span></label>
+                        <label class="ctv-option"><input type="checkbox" data-option="spatialShowAllStrands" /> <span>显示所有聊天丝线</span></label>
+                        <label class="ctv-option"><input type="checkbox" data-option="spatialAutoRotate" /> <span>自动旋转</span></label>
+                        <div class="ctv-option-row">
+                            <button class="ctv-link ctv-reset-camera-inline">重置空间视角</button>
+                            <button class="ctv-link ctv-collapse-segments">重新折叠连续段</button>
+                        </div>
                         <div class="ctv-errors ctv-hidden"></div>
                     </details>
                 </aside>
@@ -438,6 +625,7 @@ function buildOverlay() {
                         <span class="ctv-progress-text"></span>
                     </div>
                     <div class="ctv-tree"></div>
+                    <div class="ctv-spatial ctv-hidden"></div>
                     <div class="ctv-empty ctv-hidden"></div>
                 </main>
                 <aside class="ctv-detail ctv-hidden"></aside>
@@ -455,6 +643,11 @@ function buildOverlay() {
         matchCount: overlay.querySelector('.ctv-match-count'),
         chatList: overlay.querySelector('.ctv-chat-list'),
         tree: overlay.querySelector('.ctv-tree'),
+        spatial: overlay.querySelector('.ctv-spatial'),
+        viewSpatial: overlay.querySelector('[data-view="spatial"]'),
+        viewTree: overlay.querySelector('[data-view="tree"]'),
+        focusChip: overlay.querySelector('.ctv-focus-chip'),
+        focusName: overlay.querySelector('.ctv-focus-name'),
         empty: overlay.querySelector('.ctv-empty'),
         detail: overlay.querySelector('.ctv-detail'),
         progress: overlay.querySelector('.ctv-progress'),
@@ -469,8 +662,20 @@ function buildOverlay() {
 
     overlay.querySelector('.ctv-close').addEventListener('click', closeViewer);
     overlay.querySelector('.ctv-reload').addEventListener('click', () => reloadCharacter(true));
+    overlay.querySelector('.ctv-reset-camera').addEventListener('click', () => state.spatial?.resetCamera());
+    overlay.querySelector('.ctv-reset-camera-inline').addEventListener('click', () => state.spatial?.resetCamera());
+    overlay.querySelector('.ctv-collapse-segments').addEventListener('click', () => {
+        state.expandedSegments.clear();
+        rebuildSpatialModel({ preserveCamera: true });
+    });
     overlay.querySelector('.ctv-sidebar-toggle').addEventListener('click', () => {
         overlay.classList.toggle('ctv-sidebar-open');
+    });
+
+    els.viewSpatial?.addEventListener('click', () => setViewMode('spatial'));
+    els.viewTree?.addEventListener('click', () => setViewMode('tree'));
+    overlay.querySelector('.ctv-focus-clear')?.addEventListener('click', () => {
+        focusChatInSpatial(state.focusChatKey, { toggle: true });
     });
 
     els.character.addEventListener('change', () => {
@@ -537,6 +742,11 @@ function buildOverlay() {
 
             if (key === 'showColors' || key === 'activeVariantOnly' || key === 'compressChains') {
                 renderTree();
+            } else if (key === 'spatialHideStructured' || key === 'spatialHideSystem') {
+                rebuildSpatialModel();
+                applyViewMode();
+            } else if (key === 'spatialShowAnchors' || key === 'spatialShowAllStrands' || key === 'spatialAutoRotate') {
+                syncSpatialSettings();
             } else {
                 scheduleRebuild();
             }
@@ -544,6 +754,8 @@ function buildOverlay() {
     });
 
     syncOptionLabels();
+    syncSpatialSettings();
+    applyViewMode();
 
     overlay.addEventListener('click', (event) => {
         if (event.target === overlay) {
@@ -583,6 +795,10 @@ function closeViewer() {
     state.overlay?.remove();
     state.overlay = null;
     state.els = {};
+    state.spatial?.destroy();
+    state.spatial = null;
+    state.spatialModel = null;
+    state.focusChatKey = null;
     state.tree = null;
     state.parsed = new Map();
     state.chatList = [];
@@ -665,6 +881,8 @@ async function selectCharacter(character) {
     state.selectedFiles = new Set();
     state.tree = null;
     state.chatInfo = new Map();
+    state.spatialModel = null;
+    state.focusChatKey = null;
 
     state.abortController?.abort();
     state.fileLoadController?.abort();
@@ -672,9 +890,12 @@ async function selectCharacter(character) {
 
     // Drop the previous character's tree and detail text immediately.
     renderTree();
+    state.spatial?.clear();
+    updateFocusChip();
     closeDetailPanel();
     renderChatList();
     renderStats();
+    applyViewMode();
     showEmpty('正在读取聊天记录…');
 
     const controller = new AbortController();
@@ -876,15 +1097,18 @@ function rebuildTree() {
 
     if (!chats.length) {
         state.tree = null;
+        state.spatialModel = null;
         state.matches = null;
         state.matchOrder = [];
         state.nodeVariant.clear();
         state.collapsed.clear();
         state.expandedChains.clear();
         renderTree();
+        state.spatial?.clear();
         closeDetailPanel();
         showEmpty('请至少选择一条聊天记录。');
         renderStats();
+        applyViewMode();
         return;
     }
 
@@ -898,12 +1122,15 @@ function rebuildTree() {
     state.nodeVariant.clear();
     state.collapsed.clear();
     state.expandedChains.clear();
+    state.expandedSegments.clear();
     state.selectedNodeId = null;
     closeDetailPanel();
 
     rebuildMatches();
     renderTree();
+    rebuildSpatialModel();
     renderStats();
+    applyViewMode();
 }
 
 function rebuildMatches() {
@@ -911,6 +1138,7 @@ function rebuildMatches() {
         state.matches = null;
         state.matchOrder = [];
         state.els.searchNav?.classList.add('ctv-hidden');
+        state.spatial?.setSearch(null);
         return;
     }
 
@@ -919,6 +1147,7 @@ function rebuildMatches() {
         state.matches = null;
         state.matchOrder = [];
         state.els.searchNav?.classList.add('ctv-hidden');
+        state.spatial?.setSearch(null);
         return;
     }
 
@@ -955,6 +1184,135 @@ function rebuildMatches() {
 
     state.matches = { matches, subtreeHasMatch, query };
     state.els.searchNav?.classList.remove('ctv-hidden');
+    state.spatial?.setSearch(matches);
+}
+
+function ensureSpatialView() {
+    if (state.spatial || !state.els.spatial) {
+        return;
+    }
+    state.spatial = new SpatialView({
+        container: state.els.spatial,
+        onSelectNode: (ref) => selectNode(ref),
+        onFocusChat: (chatKey) => focusChatInSpatial(chatKey, { toggle: true }),
+        onExpandSegment: (segmentKey) => {
+            state.expandedSegments.add(segmentKey);
+            rebuildSpatialModel({ preserveCamera: true });
+        },
+        resolveDisplayName: (chatKey) => stripExtension(chatKey),
+    });
+    syncSpatialSettings();
+}
+
+function syncSpatialSettings() {
+    state.spatial?.setSettings({
+        showAnchors: state.settings.spatialShowAnchors,
+        showAllStrands: state.settings.spatialShowAllStrands,
+        autoRotate: state.settings.spatialAutoRotate,
+    });
+}
+
+function rebuildSpatialModel(options = {}) {
+    if (!state.tree) {
+        state.spatialModel = null;
+        return;
+    }
+    state.spatialModel = buildSpatialModel(state.tree, state.chatInfo, {
+        hideSystem: state.settings.spatialHideSystem,
+        hideStructured: state.settings.spatialHideStructured,
+        expandedSegments: state.expandedSegments,
+    });
+    if (state.spatial) {
+        state.spatial.setData(state.spatialModel, state.chatInfo, {
+            preserveCamera: Boolean(options.preserveCamera),
+        });
+        state.spatial.setVariantState(state.nodeVariant);
+        state.spatial.setSelected(state.selectedNodeId);
+        state.spatial.setSearch(state.matches?.matches || null);
+        state.spatial.setFocusChat(state.focusChatKey);
+    }
+}
+
+function applyViewMode() {
+    const spatial = state.settings.viewMode === 'spatial';
+    state.els.tree?.classList.toggle('ctv-hidden', spatial);
+    state.els.spatial?.classList.toggle('ctv-hidden', !spatial);
+    state.els.viewSpatial?.classList.toggle('active', spatial);
+    state.els.viewTree?.classList.toggle('active', !spatial);
+
+    if (!spatial) {
+        renderTree();
+        return;
+    }
+
+    ensureSpatialView();
+    if (state.spatialModel) {
+        state.spatial?.setData(state.spatialModel, state.chatInfo);
+        state.spatial?.setVariantState(state.nodeVariant);
+        state.spatial?.setSelected(state.selectedNodeId);
+        state.spatial?.setSearch(state.matches?.matches || null);
+        state.spatial?.setFocusChat(state.focusChatKey);
+    } else {
+        state.spatial?.clear();
+    }
+    state.spatial?.resize();
+}
+
+function setViewMode(mode) {
+    state.settings.viewMode = mode === 'tree' ? 'tree' : 'spatial';
+    saveSettings();
+    applyViewMode();
+    if (state.settings.viewMode === 'spatial') {
+        state.spatial?.requestRender();
+    }
+}
+
+function updateFocusChip() {
+    const chip = state.els.focusChip;
+    const name = state.els.focusName;
+    if (!chip || !name) {
+        return;
+    }
+    if (!state.focusChatKey) {
+        chip.classList.add('ctv-hidden');
+        return;
+    }
+    chip.classList.remove('ctv-hidden');
+    name.textContent = stripExtension(state.focusChatKey);
+}
+
+function focusChatInSpatial(chatKey, { toggle = false } = {}) {
+    if (!chatKey) {
+        return;
+    }
+    if (toggle && state.focusChatKey === chatKey) {
+        state.focusChatKey = null;
+    } else {
+        state.focusChatKey = chatKey;
+    }
+
+    if (state.settings.viewMode !== 'spatial' && state.focusChatKey) {
+        state.settings.viewMode = 'spatial';
+        saveSettings();
+    }
+    applyViewMode();
+    ensureSpatialView();
+    state.spatial?.setFocusChat(state.focusChatKey);
+    updateFocusChip();
+    if (state.focusChatKey) {
+        state.spatial?.focusChat(state.focusChatKey);
+    }
+    renderChatList();
+}
+
+function focusNodeInSpatial(nodeId) {
+    if (state.settings.viewMode !== 'spatial') {
+        state.settings.viewMode = 'spatial';
+        saveSettings();
+    }
+    applyViewMode();
+    state.spatial?.setSelected(nodeId);
+    state.spatial?.focusNode(nodeId);
 }
 
 function getActiveVariant(node) {
@@ -1334,6 +1692,7 @@ function stepVariant(node, direction) {
     if (state.selectedNodeId === node.id) {
         renderDetail(node);
     }
+    state.spatial?.setVariantState(state.nodeVariant);
     if (state.settings.activeVariantOnly) {
         // The tree itself does not change - only which children are visible.
         renderTree();
@@ -1347,6 +1706,7 @@ function selectNode(node) {
         row.classList.remove('ctv-selected');
     }
     highlightSelectedPath();
+    state.spatial?.setSelected(node.id);
     renderDetail(node);
 }
 
@@ -1440,6 +1800,7 @@ function renderDetail(node) {
                     updateRowVariant(node, row);
                 }
                 renderDetail(node);
+                state.spatial?.setVariantState(state.nodeVariant);
                 if (state.settings.activeVariantOnly) {
                     renderTree();
                 }
@@ -1461,6 +1822,10 @@ function renderDetail(node) {
     });
     actions.appendChild(copy);
 
+    const locate = h('button', 'ctv-btn', '在空间中定位');
+    locate.addEventListener('click', () => focusNodeInSpatial(node.id));
+    actions.appendChild(locate);
+
     const chatKeys = Array.from(node.chats);
     if (chatKeys.length) {
         // Prefer a chat where the currently displayed variant was selected.
@@ -1469,6 +1834,10 @@ function renderDetail(node) {
         open.title = occurrence ? stripExtension(occurrence.chatKey) : '';
         open.addEventListener('click', () => openChatFor(occurrence?.chatKey || chatKeys[0]));
         actions.appendChild(open);
+
+        const focus = h('button', 'ctv-btn', '聚焦此聊天');
+        focus.addEventListener('click', () => focusChatInSpatial(occurrence?.chatKey || chatKeys[0], { toggle: true }));
+        actions.appendChild(focus);
     }
     panel.appendChild(actions);
 
@@ -1611,11 +1980,52 @@ function renderChatList() {
         }
         text.appendChild(h('span', 'ctv-chat-meta', parts.join(' · ')));
 
-        if (info?.root && info.root !== info.base) {
-            text.title = `源自：${info.root}`;
+        // A compact visual fingerprint: role-coloured bars derived from the
+        // message sequence. Helps recognise a chat before reading any text.
+        if (info?.barcode?.length) {
+            const strip = h('span', 'ctv-barcode');
+            strip.title = '消息指纹：颜色来自内容，高度来自文本量';
+            for (const cell of info.barcode) {
+                const bar = h('i', 'ctv-barcode-cell');
+                bar.style.background = `hsl(${cell.hue} 70% 58%)`;
+                bar.style.height = `${4 + Math.round(cell.ratio * 8)}px`;
+                bar.style.opacity = cell.role === 'user' ? '0.95' : '0.55';
+                strip.appendChild(bar);
+            }
+            text.appendChild(strip);
         }
 
-        item.append(box, dot, text);
+        if (info?.keywords?.length) {
+            const chips = h('span', 'ctv-keywords');
+            for (const keyword of info.keywords.slice(0, 3)) {
+                chips.appendChild(h('span', 'ctv-keyword', keyword));
+            }
+            text.appendChild(chips);
+        }
+
+        const titleParts = [];
+        if (info?.root && info.root !== info.base) {
+            titleParts.push(`源自：${info.root}`);
+        }
+        if (info?.lastUser) {
+            titleParts.push(`你：${info.lastUser}`);
+        }
+        if (info?.keywords?.length) {
+            titleParts.push(`关键词：${info.keywords.join(' / ')}`);
+        }
+        if (titleParts.length) {
+            text.title = titleParts.join('\n');
+        }
+
+        const locate = h('button', 'ctv-locate', '◎');
+        locate.title = '在空间视图中定位这条聊天';
+        locate.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            focusChatInSpatial(chat.file);
+        });
+
+        item.append(box, dot, text, locate);
         list.appendChild(item);
     }
 }
@@ -1641,6 +2051,8 @@ function renderStats() {
         ['共享节点', String(stats.sharedNodeCount)],
         ['分叉点', String(stats.branchPointCount)],
         ['变体', String(stats.variantCount)],
+        ['空间节点', state.spatialModel ? String(state.spatialModel.stats.visibleNodes) : '—'],
+        ['隐藏', state.spatialModel ? String(state.spatialModel.stats.hiddenNodes) : '—'],
     ];
 
     const grid = h('div', 'ctv-stat-grid');
@@ -1663,7 +2075,13 @@ function updateMatchCounter() {
 }
 
 function jumpToMatch(direction) {
-    if (!state.tree || !state.matchOrder.length) {
+    if (!state.tree) {
+        return;
+    }
+    if (!state.matchOrder.length && state.matches) {
+        state.matchOrder = Array.from(state.matches.matches);
+    }
+    if (!state.matchOrder.length) {
         return;
     }
     const current = state.matchOrder.findIndex((id) => state.rowById.get(id)?.classList.contains('ctv-selected'));
@@ -1675,10 +2093,15 @@ function jumpToMatch(direction) {
         next = 0;
     }
     const id = state.matchOrder[next];
-    const row = state.rowById.get(id);
-    row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     const node = findNodeById(state.tree.root, id);
-    if (node) {
+    if (!node) {
+        return;
+    }
+    if (state.settings.viewMode === 'spatial') {
+        selectNode(node);
+        state.spatial?.focusNode(id);
+    } else {
+        state.rowById.get(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
         selectNode(node);
     }
 }

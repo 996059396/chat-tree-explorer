@@ -679,9 +679,204 @@
     font-size: 11px;
 }
 
+/* --- spatial view ------------------------------------------------------- */
+
+#ctv-overlay .ctv-view-switch {
+    display: inline-flex;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 8px;
+    overflow: hidden;
+    flex: 0 0 auto;
+}
+
+#ctv-overlay .ctv-view-btn {
+    border: none;
+    background: transparent;
+    color: inherit;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    opacity: 0.62;
+    white-space: nowrap;
+}
+
+#ctv-overlay .ctv-view-btn:hover {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+#ctv-overlay .ctv-view-btn.active {
+    background: color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 22%, transparent);
+    opacity: 1;
+}
+
+#ctv-overlay .ctv-focus-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 220px;
+    padding: 2px 4px 2px 8px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 45%, transparent);
+    border-radius: 999px;
+    font-size: 11px;
+    background: color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 12%, transparent);
+}
+
+#ctv-overlay .ctv-focus-chip .ctv-dot {
+    margin-top: 0;
+    background: var(--SmartThemeEmColor, #7aa2f7);
+}
+
+#ctv-overlay .ctv-focus-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#ctv-overlay .ctv-focus-clear {
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.7;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 4px;
+}
+
+#ctv-overlay .ctv-focus-clear:hover {
+    opacity: 1;
+}
+
+#ctv-overlay .ctv-main {
+    position: relative;
+}
+
+#ctv-overlay .ctv-spatial {
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+}
+
+#ctv-overlay .ctv-spatial-canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: grab;
+    outline: none;
+}
+
+#ctv-overlay .ctv-spatial-tooltip {
+    position: absolute;
+    z-index: 5;
+    max-width: 380px;
+    max-height: 260px;
+    overflow: hidden;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 40%, transparent);
+    border-radius: 8px;
+    background: rgba(7, 11, 20, 0.95);
+    color: #dce6f5;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    pointer-events: none;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+
+#ctv-overlay .ctv-option-group-title {
+    margin-top: 10px;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    opacity: 0.5;
+    text-transform: uppercase;
+}
+
+#ctv-overlay .ctv-option-row {
+    margin-top: 6px;
+}
+
+#ctv-overlay .ctv-chat-item {
+    position: relative;
+    align-items: flex-start;
+}
+
+#ctv-overlay .ctv-chat-text {
+    flex: 1 1 auto;
+}
+
+#ctv-overlay .ctv-locate {
+    flex: 0 0 auto;
+    align-self: center;
+    border: none;
+    background: transparent;
+    color: inherit;
+    opacity: 0.35;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 2px;
+}
+
+#ctv-overlay .ctv-locate:hover {
+    opacity: 1;
+    color: var(--SmartThemeEmColor, #7aa2f7);
+}
+
+#ctv-overlay .ctv-barcode {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 13px;
+    margin-top: 2px;
+}
+
+#ctv-overlay .ctv-barcode-cell {
+    display: inline-block;
+    width: 4px;
+    border-radius: 1px;
+}
+
+#ctv-overlay .ctv-keywords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 2px;
+}
+
+#ctv-overlay .ctv-keyword {
+    font-size: 10px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 12%, transparent);
+    opacity: 0.82;
+    white-space: nowrap;
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* --- mobile ------------------------------------------------------------- */
 
 @media (max-width: 900px) {
+    #ctv-overlay .ctv-header {
+        flex-wrap: wrap;
+        row-gap: 6px;
+    }
+
+    #ctv-overlay .ctv-character {
+        max-width: 42vw;
+    }
+
+    #ctv-overlay .ctv-focus-chip {
+        max-width: 70vw;
+        order: 8;
+    }
+
     #ctv-overlay .ctv-sidebar {
         position: absolute;
         top: 0;

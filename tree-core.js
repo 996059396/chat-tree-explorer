@@ -14,7 +14,62 @@
  * The renderer only needs the plain object graph returned by buildChatTree().
  */
 
-export const CORE_VERSION = 1;
+export const CORE_VERSION = 2;
+
+const STRONG_PROMPT_MARKERS = [
+    /<\|im_start\|>/i,
+    /<\|im_end\|>/i,
+    /<<SYS>>/i,
+    /\[\/?INST\]/i,
+    /<\|system\|>/i,
+    /<\|user\|>/i,
+    /<\|assistant\|>/i,
+    /<\/?system>/i,
+    /^\s*###\s*(instruction|response|system|user|assistant)\b/im,
+    /^\s*(system|assistant|user|human|ai)\s*:\s*/im,
+    /\[system note:/i,
+    /\[start a new chat\]/i,
+];
+
+const TAVERN_TEMPLATE_MARKERS = [
+    /\{\{char\}\}/i,
+    /\{\{user\}\}/i,
+    /write\s+\{\{char\}\}['’]s next reply/i,
+    /continue the (story|roleplay|chat)/i,
+    /do not write as/i,
+    /\[ooc:/i,
+    /\(ooc:/i,
+    /\[memory:/i,
+    /\[note:/i,
+];
+
+/**
+ * Classify a message for the "hide preset / structured" filter. Kept inline
+ * so tree-core stays dependency-free (it is also loaded through a data: URL in
+ * the offline tests).
+ * @param {string} text
+ * @param {string} role
+ */
+export function classifyMessage(text, role) {
+    const raw = String(text ?? '');
+    if (role === 'system') {
+        return { kind: 'system', structured: true };
+    }
+    let strong = 0;
+    for (const pattern of STRONG_PROMPT_MARKERS) {
+        if (pattern.test(raw)) {
+            strong++;
+        }
+    }
+    let tavern = 0;
+    for (const pattern of TAVERN_TEMPLATE_MARKERS) {
+        if (pattern.test(raw)) {
+            tavern++;
+        }
+    }
+    const structured = strong > 0 || tavern >= 2;
+    return { kind: structured ? 'structured' : 'dialogue', structured };
+}
 
 export const DEFAULT_OPTIONS = Object.freeze({
     /** Merge near-identical user/system messages into one node. */
@@ -382,6 +437,8 @@ export function extractMessage(raw) {
         selectedNorm = selectedVariant.norm;
     }
 
+    const classification = classifyMessage(mes, role);
+
     return {
         role,
         mes,
@@ -391,6 +448,9 @@ export function extractMessage(raw) {
         selectedNorm,
         variants,
         extraSwipes,
+        kind: classification.kind,
+        structured: classification.structured,
+        rich: /<[^>]+>/.test(mes) || /```/.test(mes),
         extra: raw.extra && typeof raw.extra === 'object' ? raw.extra : null,
     };
 }
@@ -464,6 +524,13 @@ function makeNode(role, parent) {
         lastActivity: 0,
         minIndex: Number.POSITIVE_INFINITY,
         branchPoint: false,
+        senderName: '',
+        sampleDate: '',
+        dialogueCount: 0,
+        structuredCount: 0,
+        richCount: 0,
+        structured: false,
+        rich: false,
     };
 }
 
@@ -609,6 +676,20 @@ function applyMessage(node, message, chatKey, messageIndex) {
     node.chats.add(chatKey);
     if (messageIndex < node.minIndex) {
         node.minIndex = messageIndex;
+    }
+    if (!node.senderName && message.name) {
+        node.senderName = message.name;
+    }
+    if (!node.sampleDate && message.sendDate) {
+        node.sampleDate = message.sendDate;
+    }
+    if (message.structured || message.kind === 'system') {
+        node.structuredCount++;
+    } else {
+        node.dialogueCount++;
+    }
+    if (message.rich) {
+        node.richCount++;
     }
 
     let selectedKey = message.selectedKey;
@@ -782,6 +863,8 @@ function finalizeTree(root, options) {
             return a.text.localeCompare(b.text);
         });
         node.branchPoint = node.children.length > 1;
+        node.structured = node.structuredCount > 0 && node.dialogueCount === 0;
+        node.rich = node.richCount > 0;
 
         if (node.children.length > 1) {
             node.children.sort((a, b) => {
