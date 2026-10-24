@@ -613,6 +613,11 @@ function buildOverlay() {
                         <label class="ctv-option"><input type="checkbox" data-option="spatialShowAllStrands" /> <span>显示所有聊天丝线</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialAutoRotate" /> <span>自动旋转</span></label>
                         <div class="ctv-option-row">
+                            <button class="ctv-link ctv-preset-iso">等轴</button>
+                            <button class="ctv-link ctv-preset-front">正面</button>
+                            <button class="ctv-link ctv-preset-top">俯视</button>
+                        </div>
+                        <div class="ctv-option-row">
                             <button class="ctv-link ctv-reset-camera-inline">重置空间视角</button>
                             <button class="ctv-link ctv-collapse-segments">重新折叠连续段</button>
                         </div>
@@ -625,7 +630,14 @@ function buildOverlay() {
                         <span class="ctv-progress-text"></span>
                     </div>
                     <div class="ctv-tree"></div>
-                    <div class="ctv-spatial ctv-hidden"></div>
+                    <div class="ctv-spatial ctv-hidden">
+                        <div class="ctv-spatial-toolbar">
+                            <button data-preset="iso">等轴</button>
+                            <button data-preset="front">正面</button>
+                            <button data-preset="top">俯视</button>
+                            <button data-preset="fit">全部</button>
+                        </div>
+                    </div>
                     <div class="ctv-empty ctv-hidden"></div>
                 </main>
                 <aside class="ctv-detail ctv-hidden"></aside>
@@ -667,6 +679,19 @@ function buildOverlay() {
     overlay.querySelector('.ctv-collapse-segments').addEventListener('click', () => {
         state.expandedSegments.clear();
         rebuildSpatialModel({ preserveCamera: true });
+    });
+    overlay.querySelector('.ctv-preset-iso').addEventListener('click', () => state.spatial?.setPreset('iso'));
+    overlay.querySelector('.ctv-preset-front').addEventListener('click', () => state.spatial?.setPreset('front'));
+    overlay.querySelector('.ctv-preset-top').addEventListener('click', () => state.spatial?.setPreset('top'));
+    overlay.querySelectorAll('.ctv-spatial-toolbar [data-preset]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const preset = button.dataset.preset;
+            if (preset === 'fit') {
+                state.spatial?.resetCamera();
+            } else {
+                state.spatial?.setPreset(preset);
+            }
+        });
     });
     overlay.querySelector('.ctv-sidebar-toggle').addEventListener('click', () => {
         overlay.classList.toggle('ctv-sidebar-open');

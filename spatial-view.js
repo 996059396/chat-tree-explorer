@@ -23,6 +23,7 @@ const ROLE_COLOR = {
 };
 const SHARED_COLOR = { r: 138, g: 178, b: 255 };
 const FONT_STACK = '-apple-system, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
+const FOV = Math.PI / 4.5;
 
 function clamp(value, min, max) {
     return value < min ? min : value > max ? max : value;
@@ -38,6 +39,10 @@ function rgba(color, alpha) {
 
 function roleColor(role) {
     return ROLE_COLOR[role] || ROLE_COLOR.assistant;
+}
+
+function overlap(a, b) {
+    return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
 }
 
 function roundRectPath(ctx, x, y, width, height, radius) {
@@ -132,6 +137,7 @@ export class SpatialView {
             showStructured: false,
             showDivergence: true,
             maxAnchors: 12,
+            maxTags: 140,
         };
 
         this.selectedNodeId = null;
@@ -141,14 +147,14 @@ export class SpatialView {
 
         this.camera = {
             target: { x: 0, y: 0, z: 0 },
-            yaw: 0.72,
-            pitch: 0.34,
+            yaw: 0.18,
+            pitch: 0.38,
             distance: 60,
         };
         this.goal = {
             target: { x: 0, y: 0, z: 0 },
-            yaw: 0.72,
-            pitch: 0.34,
+            yaw: 0.18,
+            pitch: 0.38,
             distance: 60,
         };
 
@@ -316,7 +322,7 @@ export class SpatialView {
         }
         const cx = relX * basis.r.x + relY * basis.r.y + relZ * basis.r.z;
         const cy = relX * basis.u.x + relY * basis.u.y + relZ * basis.u.z;
-        const focal = (this.height / 2) / Math.tan((Math.PI / 3) / 2);
+        const focal = (this.height / 2) / Math.tan(FOV / 2);
         return {
             x: this.width / 2 + (cx / cz) * focal,
             y: this.height / 2 - (cy / cz) * focal,
@@ -330,15 +336,10 @@ export class SpatialView {
             return;
         }
         const maxDepth = this.model.stats.maxDepth;
-        // Short trees fit entirely. Long trees are dominated by a tall shared
-        // trunk; start on the branching/ending region instead so cards are
-        // legible. The compass button still fits everything.
-        if (maxDepth < 26) {
-            this.fitAll();
-            return;
-        }
-        const startDepth = maxDepth * 0.62;
-        const focus = this.model.nodes.filter((view) => view.depth >= startDepth);
+        // Start on the branching/ending region, and never zoom out so far that
+        // the labels become dots. The “全部” button still fits everything.
+        const startDepth = maxDepth >= 6 ? maxDepth * 0.5 : 0;
+        const focus = this.model.nodes.filter((view) => view.displayDepth >= startDepth);
         if (focus.length < 10) {
             this.fitAll();
             return;
@@ -358,17 +359,17 @@ export class SpatialView {
         for (const view of focus) {
             include(view.x, view.y, view.z);
         }
-        for (const anchor of this.model.chatAnchors) {
-            if (anchor.terminalNode.depth >= startDepth) {
-                include(anchor.x, anchor.y, anchor.z);
-            }
-        }
 
         this.goal.target = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 };
         const radius = Math.max(6, Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) / 2);
-        this.goal.distance = clamp(radius / Math.tan((Math.PI / 3) / 2) * 1.35 + 8, 10, 4800);
-        this.goal.yaw = 0.8;
-        this.goal.pitch = 0.36;
+        const readableDistance = (this.height / 2) / Math.tan(FOV / 2) / 3.2;
+        this.goal.distance = clamp(
+            Math.min(radius / Math.tan(FOV / 2) * 1.12 + 6, readableDistance),
+            8,
+            4800,
+        );
+        this.goal.yaw = 0.18;
+        this.goal.pitch = 0.38;
         this.startAnimation();
     }
 
@@ -379,9 +380,9 @@ export class SpatialView {
         const { bounds } = this.model;
         this.goal.target = { ...bounds.center };
         const radius = Math.max(6, bounds.radius);
-        this.goal.distance = clamp(radius / Math.tan((Math.PI / 3) / 2) * 1.35 + 12, 12, 4800);
-        this.goal.yaw = 0.72;
-        this.goal.pitch = 0.34;
+        this.goal.distance = clamp(radius / Math.tan(FOV / 2) * 1.12 + 6, 12, 4800);
+        this.goal.yaw = 0.18;
+        this.goal.pitch = 0.38;
         this.startAnimation();
     }
 
@@ -445,7 +446,22 @@ export class SpatialView {
             z: (minZ + maxZ) / 2,
         };
         const radius = Math.max(5, Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) / 2);
-        this.goal.distance = clamp(radius / Math.tan((Math.PI / 3) / 2) * 1.5, 10, 2000);
+        this.goal.distance = clamp(radius / Math.tan(FOV / 2) * 1.28, 10, 2000);
+        this.startAnimation();
+    }
+
+    setPreset(name) {
+        const presets = {
+            iso: { yaw: 0.18, pitch: 0.85 },
+            front: { yaw: 0, pitch: 0.22 },
+            top: { yaw: 0, pitch: 1.35 },
+        };
+        const preset = presets[name];
+        if (!preset) {
+            return;
+        }
+        this.goal.yaw = preset.yaw;
+        this.goal.pitch = preset.pitch;
         this.startAnimation();
     }
 
@@ -567,7 +583,7 @@ export class SpatialView {
             this.panBy(dx, dy);
         } else {
             this.camera.yaw -= dx * 0.006;
-            this.camera.pitch = clamp(this.camera.pitch + dy * 0.006, -1.25, 1.25);
+            this.camera.pitch = clamp(this.camera.pitch + dy * 0.006, 0.04, 1.36);
             this.goal.yaw = this.camera.yaw;
             this.goal.pitch = this.camera.pitch;
         }
@@ -623,7 +639,7 @@ export class SpatialView {
 
     panBy(dx, dy) {
         const basis = this.basis();
-        const focal = (this.height / 2) / Math.tan((Math.PI / 3) / 2);
+        const focal = (this.height / 2) / Math.tan(FOV / 2);
         const worldPerPixel = this.camera.distance / focal;
         const moveX = -dx * worldPerPixel;
         const moveY = dy * worldPerPixel;
@@ -775,10 +791,11 @@ export class SpatialView {
         const ctx = this.ctx;
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         ctx.clearRect(0, 0, this.width, this.height);
-        this.drawBackground(ctx);
-
         const basis = this.basis();
-        const focal = (this.height / 2) / Math.tan((Math.PI / 3) / 2);
+        this.drawBackground(ctx);
+        this.drawGround(ctx, basis);
+
+        const focal = (this.height / 2) / Math.tan(FOV / 2);
 
         // Project nodes.
         this.screenNodes = [];
@@ -842,6 +859,144 @@ export class SpatialView {
         ctx.globalAlpha = 1;
     }
 
+    drawGround(ctx, basis) {
+        if (!this.model) {
+            return;
+        }
+        const { minX, maxX, maxY, minZ, maxZ } = this.model.bounds;
+        const opts = this.model.options;
+        const groundY = maxY + opts.turnSpacing * 2.5;
+        const x0 = minX - opts.laneGap * 2;
+        const x1 = maxX + opts.laneGap * 2;
+        const z0 = minZ - opts.layerGap * 2;
+        const z1 = maxZ + opts.layerGap * 2;
+
+        const line = (a, b, style, width = 1) => {
+            const pa = this.project(a, basis);
+            const pb = this.project(b, basis);
+            if (!pa || !pb) {
+                return;
+            }
+            ctx.strokeStyle = style;
+            ctx.lineWidth = width;
+            ctx.beginPath();
+            ctx.moveTo(pa.x, pa.y);
+            ctx.lineTo(pb.x, pb.y);
+            ctx.stroke();
+        };
+
+        // Ground grid: gives the eye a stable floor for depth perception.
+        for (let z = z0; z <= z1 + 0.01; z += opts.layerGap) {
+            line({ x: x0, y: groundY, z }, { x: x1, y: groundY, z }, 'rgba(110,150,220,0.07)');
+        }
+        for (let x = x0; x <= x1 + 0.01; x += opts.laneGap) {
+            line({ x, y: groundY, z: z0 }, { x, y: groundY, z: z1 }, 'rgba(110,150,220,0.07)');
+        }
+
+        // Back wall: a vertical X/Y grid makes the time axis unmistakable.
+        const backZ = z0;
+        const maxTurnEstimate = Math.ceil(this.model.stats.maxDepth / 10) * 10;
+        for (let x = x0; x <= x1 + 0.01; x += opts.laneGap) {
+            line({ x, y: 0, z: backZ }, { x, y: maxTurnEstimate * opts.turnSpacing, z: backZ }, 'rgba(110,150,220,0.04)');
+        }
+        for (let turn = 0; turn <= maxTurnEstimate; turn += 5) {
+            const y = turn * opts.turnSpacing;
+            line({ x: x0, y, z: backZ }, { x: x1, y, z: backZ }, 'rgba(140,180,255,0.06)');
+        }
+        line(
+            { x: x0 - 1.5, y: 0, z: backZ },
+            { x: x0 - 1.5, y: maxTurnEstimate * opts.turnSpacing, z: backZ },
+            'rgba(150,190,255,0.22)',
+        );
+        // Screen-space time ruler: always readable regardless of camera yaw.
+        ctx.strokeStyle = 'rgba(150,190,255,0.16)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(12, 10);
+        ctx.lineTo(12, this.height - 10);
+        ctx.stroke();
+        for (let turn = 0; turn <= maxTurnEstimate; turn += 5) {
+            const p = this.project({ x: 0, y: turn * opts.turnSpacing, z: 0 }, basis);
+            if (!p || p.y < 0 || p.y > this.height) {
+                continue;
+            }
+            ctx.strokeStyle = 'rgba(150,190,255,0.24)';
+            ctx.beginPath();
+            ctx.moveTo(12, p.y);
+            ctx.lineTo(22, p.y);
+            ctx.stroke();
+            ctx.font = `9px ${FONT_STACK}`;
+            ctx.fillStyle = 'rgba(150,190,255,0.55)';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(`#${turn}`, 26, p.y);
+        }
+        ctx.font = `9px ${FONT_STACK}`;
+        ctx.fillStyle = 'rgba(150,190,255,0.6)';
+        ctx.textBaseline = 'top';
+        ctx.fillText('时间 ↓', 12, 2);
+
+        // Horizontal depth planes + turn labels: makes "which turn is first"
+        // readable even while orbiting.
+        const step = 10;
+        const maxTurn = Math.ceil(this.model.stats.maxDepth / step) * step;
+        for (let turn = 0; turn <= maxTurn; turn += step) {
+            const y = turn * opts.turnSpacing;
+            line({ x: x0, y, z: z0 }, { x: x1, y, z: z0 }, 'rgba(140,180,255,0.07)');
+            line({ x: x0, y, z: z1 }, { x: x1, y, z: z1 }, 'rgba(140,180,255,0.07)');
+            line({ x: x0, y, z: z0 }, { x: x0, y, z: z1 }, 'rgba(140,180,255,0.05)');
+            line({ x: x1, y, z: z0 }, { x: x1, y, z: z1 }, 'rgba(140,180,255,0.05)');
+            const label = this.project({ x: x0 - 1.5, y, z: z0 }, basis);
+            if (label && label.x > -50 && label.x < this.width + 50 && label.y > -50 && label.y < this.height + 50) {
+                ctx.font = `10px ${FONT_STACK}`;
+                ctx.fillStyle = 'rgba(150,190,255,0.42)';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`#${turn}`, label.x, label.y);
+            }
+        }
+
+        // Side wall (Y/Z grid) + layer labels: makes the front/back (Z)
+        // relation explicit, complementing the vertical time ruler.
+        const sideX = x1;
+        for (let z = z0; z <= z1 + 0.01; z += opts.layerGap) {
+            line({ x: sideX, y: 0, z }, { x: sideX, y: maxTurnEstimate * opts.turnSpacing, z }, 'rgba(110,150,220,0.035)');
+        }
+        for (let turn = 0; turn <= maxTurnEstimate; turn += 10) {
+            const y = turn * opts.turnSpacing;
+            line({ x: sideX, y, z: z0 }, { x: sideX, y, z: z1 }, 'rgba(140,180,255,0.04)');
+        }
+        const layerCount = Math.max(1, Math.ceil((z1 - z0) / opts.layerGap));
+        for (let layer = 0; layer <= layerCount; layer++) {
+            const z = z0 + layer * opts.layerGap;
+            const p = this.project({ x: sideX + 1, y: 0, z }, basis);
+            if (p && p.x > -50 && p.x < this.width + 50 && p.y > -50 && p.y < this.height + 50) {
+                ctx.font = `9px ${FONT_STACK}`;
+                ctx.fillStyle = 'rgba(150,190,255,0.36)';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`L${layer}`, p.x, p.y);
+            }
+        }
+
+        // Lane rails (one per lane/layer group).
+        const groups = new Map();
+        for (const view of this.model.nodes) {
+            const key = `${view.lane}:${view.layer}`;
+            const group = groups.get(key) || {
+                lane: view.lane,
+                layer: view.layer,
+                minY: Infinity,
+                maxY: -Infinity,
+            };
+            group.minY = Math.min(group.minY, view.y);
+            group.maxY = Math.max(group.maxY, view.y);
+            groups.set(key, group);
+        }
+        for (const group of groups.values()) {
+            const x = group.lane * opts.laneGap;
+            const z = group.layer * opts.layerGap;
+            line({ x, y: group.minY, z }, { x, y: group.maxY, z }, 'rgba(130,170,240,0.16)');
+        }
+    }
+
     buildStarfield() {
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.floor(this.width / 2));
@@ -869,6 +1024,28 @@ export class SpatialView {
     drawEdges(ctx) {
         const focus = this.focusChatKey;
         const selectedPath = this.selectedPathSet();
+        const basis = this.basis();
+
+        const arrow = (a, b, style, width) => {
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const length = Math.hypot(dx, dy);
+            if (length < 6) {
+                return;
+            }
+            const ux = dx / length;
+            const uy = dy / length;
+            const size = Math.min(7, 3 + width * 2);
+            const bx = b.x - ux * size * 1.6;
+            const by = b.y - uy * size * 1.6;
+            ctx.fillStyle = style;
+            ctx.beginPath();
+            ctx.moveTo(b.x, b.y);
+            ctx.lineTo(bx - uy * size * 0.55, by + ux * size * 0.55);
+            ctx.lineTo(bx + uy * size * 0.55, by - ux * size * 0.55);
+            ctx.closePath();
+            ctx.fill();
+        };
 
         for (const edge of this.model.edges) {
             const parent = edge.parent;
@@ -886,26 +1063,59 @@ export class SpatialView {
             if (selectedEdge) {
                 color = 'rgba(255,214,120,';
                 alpha = 0.95;
-                width = 2.2;
+                width = 2.4;
             } else if (child.chatCount === 1 && child.ref.chats) {
                 const chatKey = Array.from(child.ref.chats)[0];
                 const info = this.chatInfo.get(chatKey);
                 color = info ? `hsl(${info.hue ?? 210} 70% 60%,` : 'rgba(120,170,255,';
-                alpha = relatedToFocus ? 0.5 : 0.05;
+                alpha = relatedToFocus ? 0.5 : 0.04;
                 width = 1.2;
             } else {
                 color = 'rgba(130,175,255,';
-                alpha = (relatedToFocus ? 0.32 : 0.04) + Math.min(0.2, child.chatCount * 0.01);
+                alpha = (relatedToFocus ? 0.3 : 0.03) + Math.min(0.18, child.chatCount * 0.01);
                 width = 1 + Math.min(2.2, Math.log2(child.chatCount + 1) * 0.5);
             }
 
             const fog = this.fog(child._cz);
-            ctx.strokeStyle = `${color}${(alpha * fog).toFixed(3)})`;
+            const style = `${color}${(alpha * fog).toFixed(3)})`;
+
+            // Git-style routing: straight down within a lane, otherwise a
+            // vertical stub → horizontal bend → vertical drop. This makes the
+            // parent/child order readable from any camera angle.
+            const points = [];
+            if (parent.lane === child.lane && parent.layer === child.layer) {
+                points.push(
+                    { x: parent.x, y: parent.y, z: parent.z },
+                    { x: child.x, y: child.y, z: child.z },
+                );
+            } else {
+                const midY = parent.y + (child.y - parent.y) * 0.45;
+                points.push(
+                    { x: parent.x, y: parent.y, z: parent.z },
+                    { x: parent.x, y: midY, z: parent.z },
+                    { x: child.x, y: midY, z: child.z },
+                    { x: child.x, y: child.y, z: child.z },
+                );
+            }
+
+            const projected = points.map((point) => this.project(point, basis));
+            if (projected.some((point) => !point)) {
+                continue;
+            }
+
+            ctx.strokeStyle = style;
             ctx.lineWidth = width;
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
             ctx.beginPath();
-            ctx.moveTo(parent._sx, parent._sy);
-            ctx.lineTo(child._sx, child._sy);
+            ctx.moveTo(projected[0].x, projected[0].y);
+            for (let index = 1; index < projected.length; index++) {
+                ctx.lineTo(projected[index].x, projected[index].y);
+            }
             ctx.stroke();
+
+            const arrowAlpha = Math.min(1, alpha * fog * 1.8);
+            arrow(projected[projected.length - 2], projected[projected.length - 1], `${color}${arrowAlpha.toFixed(3)})`, width);
         }
     }
 
@@ -967,12 +1177,14 @@ export class SpatialView {
     drawNodes(ctx, focal) {
         const focus = this.focusChatKey;
         const pathSet = this.selectedPathSet();
+        const tagCandidates = [];
+
         for (const entry of this.screenNodes) {
             const view = entry.view;
+            if (view.role === 'root' || view.id === 'root') {
+                continue;
+            }
             const fog = this.fog(entry.cz);
-            const cardW = Math.min(360, 4.6 * entry.scale);
-            const cardH = cardW * (1.32 / 4.6);
-
             const relatedToFocus = !focus || (view.ref.chats && view.ref.chats.has(focus));
             const segmentContains = (nodeId) => Boolean(
                 nodeId && view.segmentNodes && view.segmentNodes.some((node) => node.id === nodeId),
@@ -984,134 +1196,152 @@ export class SpatialView {
             );
             const selected = view.id === this.selectedNodeId || segmentContains(this.selectedNodeId);
             const hovered = view.id === this.hoveredNodeId;
-            const matched = this.searchMatches && (this.searchMatches.has(view.id) || segmentMatch);
-            const onSelectedPath = selected || pathSet.has(view.id);
+            const matched = Boolean(this.searchMatches && (this.searchMatches.has(view.id) || segmentMatch));
 
-            let alpha = fog * (relatedToFocus ? 1 : 0.16);
-            if (view.role === 'assistant') {
-                alpha *= 0.9;
-            }
-            if (view.role === 'user') {
-                alpha = Math.min(1, alpha * 1.08);
-            }
+            let alpha = fog * (relatedToFocus ? 1 : 0.12);
+            if (view.role === 'assistant') alpha *= 0.92;
 
-            if (cardW < 7) {
-                const r = clamp(entry.scale * 0.55, 1.2, 3.4);
-                const color = roleColor(view.role);
-                ctx.fillStyle = rgba(color, alpha * (view.chatCount > 1 ? 0.95 : 0.65));
+            const baseRadius = view.segmentNodes ? 4.2 : view.chatCount > 1 ? 3.8 : 3.0;
+            const radius = clamp(baseRadius * Math.sqrt(Math.max(0.3, entry.scale / 8)), 1.8, 7);
+            const role = roleColor(view.role);
+
+            // Fake drop shadow + shaded bead: a real 3D anchor instead of a
+            // billboard pretending to be a 3D object.
+            ctx.fillStyle = `rgba(0,0,0,${0.3 * alpha})`;
+            ctx.beginPath();
+            ctx.ellipse(entry.x + radius * 0.5, entry.y + radius * 1.6, radius * 1.25, radius * 0.55, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            const gradient = ctx.createRadialGradient(
+                entry.x - radius * 0.3, entry.y - radius * 0.35, radius * 0.15,
+                entry.x, entry.y, radius,
+            );
+            gradient.addColorStop(0, `rgba(255,255,255,${0.9 * alpha})`);
+            gradient.addColorStop(1, rgba(role, 0.95 * alpha));
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(entry.x, entry.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (view.chatCount > 1 || selected || matched) {
+                ctx.strokeStyle = selected
+                    ? `rgba(255,224,140,${alpha})`
+                    : matched
+                        ? `rgba(255,209,102,${0.9 * alpha})`
+                        : `rgba(200,225,255,${0.5 * alpha})`;
+                ctx.lineWidth = selected ? 2 : 1;
                 ctx.beginPath();
-                ctx.arc(entry.x, entry.y, r, 0, Math.PI * 2);
-                ctx.fill();
-                entry.radius = r + 2;
-                if (selected || matched) {
-                    ctx.strokeStyle = matched ? 'rgba(255,209,102,0.95)' : 'rgba(255,255,255,0.9)';
-                    ctx.lineWidth = 1.4;
-                    ctx.beginPath();
-                    ctx.arc(entry.x, entry.y, r + 3, 0, Math.PI * 2);
-                    ctx.stroke();
-                }
+                ctx.arc(entry.x, entry.y, radius + 2.5, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            entry.radius = radius + 4;
+            entry.rect = null;
+
+            const turnLabel = `#${view.turn ?? view.displayDepth}`;
+
+            if (entry.scale < 2.8) {
+                ctx.font = `9px ${FONT_STACK}`;
+                ctx.fillStyle = `rgba(190,210,240,${0.55 * alpha})`;
+                ctx.textBaseline = 'middle';
+                ctx.fillText(turnLabel, entry.x + radius + 4, entry.y);
                 continue;
             }
 
-            if (cardW < 34) {
-                const w = Math.max(10, cardW);
-                const h = Math.max(6, cardH);
-                const x = entry.x - w / 2;
-                const y = entry.y - h / 2;
-                const color = roleColor(view.role);
-                ctx.fillStyle = `rgba(10,15,26,${0.72 * alpha})`;
-                roundRectPath(ctx, x, y, w, h, Math.min(4, h / 2));
-                ctx.fill();
-                ctx.fillStyle = rgba(color, 0.9 * alpha);
-                roundRectPath(ctx, x, y, Math.max(2, w * 0.16), h, 2);
-                ctx.fill();
-                entry.rect = { x, y, w, h };
-                if (selected || hovered || matched) {
-                    ctx.strokeStyle = matched ? 'rgba(255,209,102,0.95)' : selected ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.45)';
-                    ctx.lineWidth = 1.2;
-                    roundRectPath(ctx, x - 1, y - 1, w + 2, h + 2, Math.min(5, h / 2));
-                    ctx.stroke();
-                }
+            tagCandidates.push({ entry, view, alpha, selected, hovered, matched, turnLabel });
+        }
+
+        // Tags are screen-space labels pinned to beads. Near-first, with
+        // collision avoidance so the graph stays readable.
+        tagCandidates.sort((a, b) => {
+            const importanceA = a.selected || a.hovered ? 1 : 0;
+            const importanceB = b.selected || b.hovered ? 1 : 0;
+            return importanceA - importanceB || a.entry.cz - b.entry.cz;
+        });
+        const placed = [];
+        let drawn = 0;
+        const maxTags = this.settings.maxTags || 140;
+        for (const item of tagCandidates) {
+            if (!item.selected && !item.hovered && drawn >= maxTags) {
                 continue;
             }
-
-            this.drawCard(ctx, entry, view, cardW, cardH, alpha, selected, hovered, matched, onSelectedPath);
+            const tag = this.tagRect(item);
+            if (!item.selected && !item.hovered && placed.some((other) => overlap(tag, other))) {
+                continue;
+            }
+            placed.push(tag);
+            this.drawTag(ctx, item, tag);
+            item.entry.rect = tag;
+            drawn++;
         }
     }
 
-    drawCard(ctx, entry, view, width, height, alpha, selected, hovered, matched, onPath) {
-        const x = entry.x - width / 2;
-        const y = entry.y - height / 2;
+    tagRect(item) {
+        const { entry, view } = item;
+        const side = (view.lane ?? 0) >= 0 ? 1 : -1;
+        const width = clamp(110 + entry.scale * 2.4, 100, 200);
+        const twoLines = entry.scale > 8 || item.selected || item.hovered;
+        const height = twoLines ? 40 : 24;
+        const x = side > 0 ? entry.x + entry.radius + 6 : entry.x - entry.radius - 6 - width;
+        // Stagger labels above/below the bead so adjacent lanes can both show
+        // a label without overlapping.
+        const above = ((Math.abs(view.lane ?? 0) + (view.layer ?? 0)) % 2) === 1;
+        const y = clamp(above ? entry.y - height - 7 : entry.y + 7, 4, this.height - height - 4);
+        return { x, y, w: width, h: height, side, twoLines, above };
+    }
 
-        const role = roleColor(view.role);
-        const shared = view.chatCount > 1;
+    drawTag(ctx, item, tag) {
+        const { view, alpha, selected, hovered, matched, turnLabel } = item;
         const info = this.chatInfo.get(view.ref.chats ? Array.from(view.ref.chats)[0] : '');
-        const borderHue = info?.hue ?? 210;
+        const role = roleColor(view.role);
+        const hue = info?.hue ?? 210;
+        const x = tag.x;
+        const y = tag.y;
+        const w = tag.w;
+        const h = tag.h;
 
-        // Card body.
-        ctx.fillStyle = `rgba(9,14,24,${0.88 * alpha})`;
-        roundRectPath(ctx, x, y, width, height, Math.min(8, height * 0.22));
+        const bx = tag.side > 0 ? x : x + w;
+        ctx.strokeStyle = `hsla(${hue},70%,62%,${0.55 * alpha})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(item.entry.x, item.entry.y);
+        ctx.lineTo(bx, y + h / 2);
+        ctx.stroke();
+
+        ctx.fillStyle = `rgba(8,12,22,${0.9 * alpha})`;
+        roundRectPath(ctx, x, y, w, h, 5);
         ctx.fill();
 
-        // Slight tint for branch-specific nodes.
-        if (!shared && info) {
-            ctx.fillStyle = `hsla(${borderHue}, 65%, 55%, ${0.06 * alpha})`;
-            roundRectPath(ctx, x, y, width, height, Math.min(8, height * 0.22));
-            ctx.fill();
-        }
-
-        // Border.
-        if (selected) {
-            ctx.strokeStyle = `rgba(255,224,140,${0.95 * alpha})`;
-            ctx.lineWidth = 1.8;
-        } else if (matched) {
-            ctx.strokeStyle = `rgba(255,209,102,${0.9 * alpha})`;
-            ctx.lineWidth = 1.4;
-        } else if (hovered) {
-            ctx.strokeStyle = `rgba(235,245,255,${0.85 * alpha})`;
-            ctx.lineWidth = 1.3;
-        } else if (shared) {
-            ctx.strokeStyle = `rgba(138,178,255,${0.38 * alpha})`;
-            ctx.lineWidth = 1;
-        } else {
-            ctx.strokeStyle = `hsla(${borderHue}, 65%, 60%, ${0.5 * alpha})`;
-            ctx.lineWidth = 1;
-        }
+        ctx.strokeStyle = selected
+            ? `rgba(255,224,140,${0.95 * alpha})`
+            : matched
+                ? `rgba(255,209,102,${0.9 * alpha})`
+                : hovered
+                    ? `rgba(235,245,255,${0.8 * alpha})`
+                    : view.chatCount > 1
+                        ? `rgba(138,178,255,${0.4 * alpha})`
+                        : `hsla(${hue},65%,60%,${0.55 * alpha})`;
+        ctx.lineWidth = selected ? 1.6 : 1;
         if (view.segmentNodes) {
             ctx.setLineDash([5, 4]);
         }
-        roundRectPath(ctx, x, y, width, height, Math.min(8, height * 0.22));
+        roundRectPath(ctx, x, y, w, h, 5);
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Role strip.
         ctx.fillStyle = rgba(role, 0.92 * alpha);
-        roundRectPath(ctx, x, y, Math.max(2.5, width * 0.018), height, 2);
-        ctx.fill();
+        ctx.fillRect(x, y, 3, h);
 
-        // Selected-path glow line.
-        if (onPath && !selected) {
-            ctx.fillStyle = `rgba(255,214,120,${0.35 * alpha})`;
-            ctx.fillRect(x, y + height - 1.5, width, 1.5);
-        }
-
-        const padX = Math.max(5, width * 0.028);
-        const padY = Math.max(3, height * 0.08);
-        const contentX = x + Math.max(6, width * 0.025) + padX * 0.5;
-        const contentW = width - (contentX - x) - padX;
-        let cursorY = y + padY;
-
-        const senderSize = clamp(height * 0.24, 8, 13);
-        const textSize = clamp(height * 0.26, 8.5, 14);
-        const metaSize = clamp(height * 0.19, 7, 10.5);
-
+        const pad = 6;
         ctx.textBaseline = 'top';
-
-        // Sender + badges.
-        ctx.font = `600 ${senderSize}px ${FONT_STACK}`;
-        const senderText = fitText(ctx, view.sender || ROLE_LABEL[view.role] || view.role, contentW * 0.6, this.textCache);
-        ctx.fillStyle = rgba(role, 0.98 * alpha);
-        ctx.fillText(senderText, contentX, cursorY);
+        ctx.font = `600 10px ${FONT_STACK}`;
+        ctx.fillStyle = `rgba(230,240,255,${0.95 * alpha})`;
+        const sender = view.sender || ROLE_LABEL[view.role] || view.role;
+        ctx.fillText(
+            fitText(ctx, `${turnLabel} ${sender}`, w - pad * 2 - 6, this.textCache),
+            x + pad + 3,
+            y + 4,
+        );
 
         const badges = [];
         if (view.variantCount > 1) {
@@ -1123,79 +1353,53 @@ export class SpatialView {
         if (view.children.length > 1) {
             badges.push(`${view.children.length}支`);
         }
-        if (view.structured) {
-            badges.push('预设');
-        } else if (view.rich) {
-            badges.push('富文本');
-        }
-        if (view.displayLength > 600) {
-            badges.push('长');
-        }
         if (view.segmentNodes) {
-            badges.push('＋展开');
+            badges.push('＋');
         }
-        if (badges.length && width > 120) {
-            ctx.font = `${metaSize}px ${FONT_STACK}`;
+        if (badges.length && w > 150) {
+            ctx.font = `8.5px ${FONT_STACK}`;
             ctx.fillStyle = `rgba(170,200,245,${0.72 * alpha})`;
-            const badgeText = badges.join(' · ');
+            const badgeText = badges.join('·');
             const badgeW = ctx.measureText(badgeText).width;
-            ctx.fillText(badgeText, x + width - padX - badgeW, cursorY + (senderSize - metaSize) * 0.5);
+            ctx.fillText(badgeText, x + w - pad - badgeW, y + 5);
         }
 
-        cursorY += senderSize + Math.max(1, height * 0.04);
-
-        // Message text. User messages get an extra line because they are short
-        // and are the strongest recognition cue; assistant messages are often
-        // huge and get a single line (full text in the detail/tooltip).
-        ctx.font = `${textSize}px ${FONT_STACK}`;
-        ctx.fillStyle = `rgba(222,233,250,${0.92 * alpha})`;
-        const lineHeight = textSize * 1.22;
-        const maxLines = height > 80 ? 2 : height > 50 ? (view.role === 'user' ? 2 : 1) : 1;
-        const textWidth = contentW;
-        const raw = String(view.displayText || view.text || '（空消息）').replace(/\s+/g, ' ').trim();
-        const chars = Array.from(raw);
+        const text = String(view.displayText || view.text || '').replace(/\s+/g, ' ').trim();
+        const lines = tag.twoLines ? 2 : 1;
+        const bodySize = 9;
+        const lineHeight = bodySize * 1.2;
+        const chars = Array.from(text);
         let shown = 0;
-        for (let line = 0; line < maxLines && shown < chars.length; line++) {
-            const remaining = chars.slice(shown).join('');
-            const fitted = fitText(ctx, remaining, textWidth, this.textCache);
+        let cursorY = y + 4 + 10 + 1;
+        for (let line = 0; line < lines && shown < chars.length; line++) {
+            const fitted = fitText(ctx, chars.slice(shown).join(''), w - pad * 2 - 3, this.textCache);
             if (!fitted) {
                 break;
             }
-            ctx.fillText(fitted, contentX, cursorY);
+            ctx.font = `${bodySize}px ${FONT_STACK}`;
+            ctx.fillStyle = `rgba(205,220,242,${0.9 * alpha})`;
+            ctx.fillText(fitted, x + pad + 3, cursorY);
             cursorY += lineHeight;
-            // Approximate consumed characters; fitText adds an ellipsis at the
-            // end, so only draw a second line if the text was truncated.
-            if (!fitted.endsWith('…')) {
-                shown = chars.length;
-            } else {
+            if (fitted.endsWith('…')) {
                 shown += Math.max(1, Array.from(fitted).length - 1);
+            } else {
+                shown = chars.length;
             }
         }
 
-        // Feature strip + length bar + chat dots.
-        if (height > 34 && width > 90) {
-            const hues = textFeatureHues(view.displayText || view.text, 8);
-            const cell = Math.max(3, Math.min(7, height * 0.1));
-            const stripY = y + height - cell - Math.max(2, height * 0.06);
-            let stripX = contentX;
-            ctx.globalAlpha = 0.65 * alpha;
-            for (const hue of hues) {
-                ctx.fillStyle = `hsl(${hue}, 70%, 58%)`;
-                ctx.fillRect(stripX, stripY, cell, cell);
-                stripX += cell + 2;
+        if (h >= 40 && w > 90) {
+            const hues = textFeatureHues(text, 8);
+            const cell = 3.5;
+            let sx = x + pad + 3;
+            const sy = y + h - cell - 3;
+            ctx.globalAlpha = 0.6 * alpha;
+            for (const featureHue of hues) {
+                ctx.fillStyle = `hsl(${featureHue},70%,58%)`;
+                ctx.fillRect(sx, sy, cell, cell);
+                sx += cell + 1.5;
             }
             ctx.globalAlpha = 1;
-
-            // Relative display length: a quick "how much text is in here" cue.
-            const lengthRatio = clamp(view.displayLength / 2000, 0.02, 1);
-            const barW = Math.max(12, contentW * 0.35);
-            ctx.fillStyle = `rgba(120,150,200,${0.25 * alpha})`;
-            ctx.fillRect(x + width - padX - barW, stripY + 1, barW, 2);
-            ctx.fillStyle = rgba(role, 0.7 * alpha);
-            ctx.fillRect(x + width - padX - barW, stripY + 1, barW * lengthRatio, 2);
         }
-
-        entry.rect = { x, y, w: width, h: height };
     }
 
     drawDivergenceMarkers(ctx) {
@@ -1229,6 +1433,46 @@ export class SpatialView {
         }
     }
 
+    drawCompactAnchors(ctx, anchors) {
+        anchors.sort((a, b) => a.cz - b.cz);
+        const placed = [];
+        let drawn = 0;
+        for (const item of anchors) {
+            if (drawn >= 14) {
+                break;
+            }
+            const info = this.chatInfo.get(item.anchor.chatKey);
+            const label = this.resolveDisplayName(item.anchor.chatKey);
+            const width = clamp(64 + label.length * 6.5, 80, 170);
+            const height = 20;
+            const x = clamp(item.x - width / 2, 4, this.width - width - 4);
+            const y = clamp(item.y + 10, 4, this.height - height - 4);
+            const rect = { x, y, w: width, h: height };
+            if (placed.some((other) => overlap(rect, other))) {
+                continue;
+            }
+            placed.push(rect);
+            drawn++;
+
+            const hue = info?.hue ?? 210;
+            ctx.fillStyle = 'rgba(8,12,22,0.84)';
+            roundRectPath(ctx, x, y, width, height, 5);
+            ctx.fill();
+            ctx.strokeStyle = `hsla(${hue},70%,62%,0.55)`;
+            ctx.lineWidth = 1;
+            roundRectPath(ctx, x, y, width, height, 5);
+            ctx.stroke();
+            ctx.fillStyle = `hsl(${hue},70%,62%)`;
+            ctx.fillRect(x, y, 3, height);
+            ctx.font = `9.5px ${FONT_STACK}`;
+            ctx.fillStyle = 'rgba(210,225,245,0.9)';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(fitText(ctx, label, width - 12, this.textCache), x + 8, y + height / 2 + 0.5);
+
+            this.screenAnchors.push({ anchor: item.anchor, rect });
+        }
+    }
+
     drawAnchors(ctx) {
         if (!this.settings.showAnchors || !this.model) {
             return;
@@ -1250,6 +1494,9 @@ export class SpatialView {
                 continue;
             }
             anchors.push({ anchor, ...projected });
+        }
+        if (!this.focusChatKey) {
+            return;
         }
         const focusItem = this.focusChatKey
             ? anchors.find((item) => item.anchor.chatKey === this.focusChatKey)

@@ -770,6 +770,30 @@
     outline: none;
 }
 
+#ctv-overlay .ctv-spatial-toolbar {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 4;
+    display: flex;
+    gap: 4px;
+}
+
+#ctv-overlay .ctv-spatial-toolbar button {
+    border: 1px solid color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 35%, transparent);
+    background: rgba(8, 12, 22, 0.78);
+    color: var(--SmartThemeBodyColor, #dce6f5);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+#ctv-overlay .ctv-spatial-toolbar button:hover {
+    background: color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 22%, rgba(8, 12, 22, 0.9));
+}
+
 #ctv-overlay .ctv-spatial-tooltip {
     position: absolute;
     z-index: 5;

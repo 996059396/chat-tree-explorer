@@ -24,7 +24,7 @@ import { plainTextForDisplay, classifyMessageText } from './spatial-text.js';
 export const SPATIAL_DEFAULTS = Object.freeze({
     hideSystem: true,
     hideStructured: true,
-    turnSpacing: 3.6,
+    turnSpacing: 4.6,
     baseRadius: 10,
     depthRadius: 2.0,
     branchRadius: 3.4,
@@ -34,7 +34,10 @@ export const SPATIAL_DEFAULTS = Object.freeze({
     branchRadiusPerChild: 0.5,
     branchRadiusMaxFan: 10,
     goldenAngle: 2.399963229728653,
-    baseMode: 'per-chat', // 'per-chat' | 'per-root'
+    layoutMode: 'lane', // 'lane' | 'radial'
+    baseMode: 'per-chat', // radial mode: 'per-chat' | 'per-root'
+    laneGap: 8,
+    layerGap: 6,
     anchorOffset: 7.0,
     jitter: 0.06,
     maxBaseDepth: 8,
@@ -43,6 +46,7 @@ export const SPATIAL_DEFAULTS = Object.freeze({
     // trunk from turning the whole spatial view into a line of dots.
     collapseChains: true,
     chainMin: 5,
+    chainMax: 20,
 });
 
 function hashString(text) {
@@ -105,6 +109,9 @@ function makeView(ref, parent) {
         offsetZ: 0,
         branchIndex: 0,
         siblingCount: 1,
+        lane: 0,
+        layer: 0,
+        turn: 0,
         segmentNodes: null,
         segmentCount: 0,
         segmentKey: '',
@@ -334,6 +341,9 @@ function makeSegment(run) {
         offsetZ: 0,
         branchIndex: 0,
         siblingCount: 1,
+        lane: 0,
+        layer: 0,
+        turn: 0,
         segmentNodes: run,
         segmentCount: run.length,
         segmentKey: first.id,
@@ -374,7 +384,8 @@ function collapseLinearRuns(rootView, options) {
                 run.push(current);
             }
 
-            if (run.length >= options.chainMin && expanded.has(run[0].id)) {
+            const isExpanded = run.some((view) => expanded.has(view.id));
+            if (run.length >= options.chainMin && isExpanded) {
                 // Keep this whole run expanded, but still process the branches
                 // that continue after it.
                 const last = run[run.length - 1];
@@ -382,9 +393,33 @@ function collapseLinearRuns(rootView, options) {
                     stack.push(child);
                 }
             } else if (run.length >= options.chainMin) {
-                const segment = makeSegment(run);
-                parent.children[index] = segment;
-                stack.push(segment);
+                // Split very long linear runs into several segment cards so the
+                // trunk still reads as a sequence instead of one huge card.
+                const chunkMax = Math.max(options.chainMin + 1, options.chainMax || 20);
+                let tail = run;
+                let attachParent = parent;
+                let attachIndex = index;
+                let lastSegment = null;
+                while (tail.length) {
+                    const chunk = tail.slice(0, chunkMax);
+                    const isLast = chunk.length === tail.length;
+                    const segment = makeSegment(chunk);
+                    segment.parent = attachParent;
+                    if (isLast) {
+                        segment.children = chunk[chunk.length - 1].children.slice();
+                        for (const child of segment.children) {
+                            child.parent = segment;
+                        }
+                    } else {
+                        segment.children = [];
+                    }
+                    attachParent.children[attachIndex] = segment;
+                    lastSegment = segment;
+                    attachParent = segment;
+                    attachIndex = 0;
+                    tail = tail.slice(chunkMax);
+                }
+                stack.push(lastSegment);
             } else {
                 // No collapse here, but still process this node's children:
                 // it may be a branch point whose subtrees contain long runs.
@@ -405,6 +440,94 @@ function assignDisplayDepths(rootView) {
         for (const child of view.children) {
             child.displayDepth = view.displayDepth + 1;
             stack.push(child);
+        }
+    }
+}
+
+/**
+ * Lane layout: the conversation is a git-like graph.
+ *
+ *   X = branch lane (main trunk = 0, branches alternate ±1, ±2, …)
+ *   Y = turn depth (time always flows downward)
+ *   Z = nesting layer (main child stays in the layer, side branches step back)
+ *
+ * Lanes are interval-allocated and reused after a branch ends, so wide trees do
+ * not explode horizontally. Vertical edges + orthogonal branch bends make the
+ * order unambiguous, unlike a radial free-form layout.
+ */
+function assignLanePositions(rootView, options) {
+    if (!rootView) {
+        return;
+    }
+
+    // Subtree maximum display depth, for lane interval allocation.
+    const order = [];
+    const stack = [rootView];
+    while (stack.length) {
+        const view = stack.pop();
+        order.push(view);
+        for (const child of view.children) {
+            stack.push(child);
+        }
+    }
+    for (let index = order.length - 1; index >= 0; index--) {
+        const view = order[index];
+        let max = view.displayDepth;
+        for (const child of view.children) {
+            if (child._subtreeMax > max) {
+                max = child._subtreeMax;
+            }
+        }
+        view._subtreeMax = max;
+    }
+
+    rootView.lane = 0;
+    rootView.layer = 0;
+    rootView.turn = 1;
+    rootView.x = 0;
+    rootView.y = 0;
+    rootView.z = 0;
+
+    const laneEnds = new Map([[0, rootView._subtreeMax]]);
+    const queue = [rootView];
+
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+        const parent = queue[cursor];
+        const children = [...parent.children].sort(
+            (a, b) => (b.chatCount - a.chatCount)
+                || (a.displayDepth - b.displayDepth)
+                || String(a.id).localeCompare(String(b.id)),
+        );
+
+        for (let index = 0; index < children.length; index++) {
+            const child = children[index];
+            if (index === 0) {
+                child.lane = parent.lane;
+                child.layer = parent.layer;
+            } else {
+                let lane = null;
+                for (let offset = 1; offset < 256 && lane === null; offset++) {
+                    for (const candidate of [parent.lane + offset, parent.lane - offset]) {
+                        const end = laneEnds.get(candidate);
+                        if (end === undefined || end < child.displayDepth) {
+                            lane = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (lane === null) {
+                    lane = parent.lane + 1;
+                }
+                laneEnds.set(lane, child._subtreeMax);
+                child.lane = lane;
+                child.layer = parent.layer + 1;
+            }
+
+            child.turn = child.displayDepth;
+            child.x = child.lane * options.laneGap;
+            child.z = child.layer * options.layerGap;
+            child.y = child.displayDepth * options.turnSpacing;
+            queue.push(child);
         }
     }
 }
@@ -441,10 +564,14 @@ export function buildSpatialModel(tree, chatInfo, options = {}) {
     assignDisplayDepths(rootView);
 
     const { nodes, edges } = collectVisible(rootView);
-    const bases = computeChatBases(chatInfo, opts);
+    const bases = opts.layoutMode === 'lane' ? null : computeChatBases(chatInfo, opts);
 
     if (rootView) {
-        assignPositions(rootView, bases, opts);
+        if (opts.layoutMode === 'lane') {
+            assignLanePositions(rootView, opts);
+        } else {
+            assignPositions(rootView, bases, opts);
+        }
     }
 
     // Chat paths and anchors.
@@ -538,10 +665,14 @@ export function buildSpatialModel(tree, chatInfo, options = {}) {
                 : terminal.role;
         const terminalRole = terminal.segmentNodes ? terminal.segmentTerminalRole : terminal.role;
 
-        const base = bases.get(chatKey);
+        const base = bases ? bases.get(chatKey) : null;
         let dx = 0;
         let dz = 0;
-        if (base) {
+        if (opts.layoutMode === 'lane') {
+            const side = terminal.lane >= 0 ? 1 : -1;
+            dx = side * opts.anchorOffset;
+            dz = opts.layerGap * 0.6;
+        } else if (base) {
             const length = Math.hypot(base.x, base.z) || 1;
             dx = (base.x / length) * opts.anchorOffset;
             dz = (base.z / length) * opts.anchorOffset;
