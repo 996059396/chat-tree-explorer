@@ -34,6 +34,7 @@ const DEFAULT_SETTINGS = {
     spatialHideStructured: true,
     spatialHideSystem: true,
     spatialShowAnchors: true,
+    spatialShowMinimap: true,
     spatialShowAllStrands: false,
     spatialAutoRotate: false,
 };
@@ -117,6 +118,7 @@ function loadSettings() {
         merged.spatialHideStructured = Boolean(merged.spatialHideStructured);
         merged.spatialHideSystem = Boolean(merged.spatialHideSystem);
         merged.spatialShowAnchors = Boolean(merged.spatialShowAnchors);
+        merged.spatialShowMinimap = Boolean(merged.spatialShowMinimap);
         merged.spatialShowAllStrands = Boolean(merged.spatialShowAllStrands);
         merged.spatialAutoRotate = Boolean(merged.spatialAutoRotate);
 
@@ -610,6 +612,7 @@ function buildOverlay() {
                         <label class="ctv-option"><input type="checkbox" data-option="spatialHideStructured" /> <span>隐藏预设 / 结构化消息</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialHideSystem" /> <span>隐藏系统消息</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialShowAnchors" /> <span>显示聊天锚点</span></label>
+                        <label class="ctv-option"><input type="checkbox" data-option="spatialShowMinimap" /> <span>显示小地图</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialShowAllStrands" /> <span>显示所有聊天丝线</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialAutoRotate" /> <span>自动旋转</span></label>
                         <div class="ctv-option-row">
@@ -770,7 +773,7 @@ function buildOverlay() {
             } else if (key === 'spatialHideStructured' || key === 'spatialHideSystem') {
                 rebuildSpatialModel();
                 applyViewMode();
-            } else if (key === 'spatialShowAnchors' || key === 'spatialShowAllStrands' || key === 'spatialAutoRotate') {
+            } else if (key === 'spatialShowAnchors' || key === 'spatialShowMinimap' || key === 'spatialShowAllStrands' || key === 'spatialAutoRotate') {
                 syncSpatialSettings();
             } else {
                 scheduleRebuild();
@@ -1220,6 +1223,7 @@ function ensureSpatialView() {
         container: state.els.spatial,
         onSelectNode: (ref) => selectNode(ref),
         onFocusChat: (chatKey) => focusChatInSpatial(chatKey, { toggle: true }),
+        onSearch: () => state.els.search?.focus(),
         onExpandSegment: (segmentKey) => {
             state.expandedSegments.add(segmentKey);
             rebuildSpatialModel({ preserveCamera: true });
@@ -1232,6 +1236,7 @@ function ensureSpatialView() {
 function syncSpatialSettings() {
     state.spatial?.setSettings({
         showAnchors: state.settings.spatialShowAnchors,
+        showMinimap: state.settings.spatialShowMinimap,
         showAllStrands: state.settings.spatialShowAllStrands,
         autoRotate: state.settings.spatialAutoRotate,
     });
@@ -1805,6 +1810,33 @@ function renderDetail(node) {
     });
     header.append(title, close);
     panel.appendChild(header);
+
+    // Breadcrumb of ancestors: makes the path and turn order explicit.
+    const ancestors = [];
+    let parent = node.parent;
+    while (parent && parent.role !== 'root') {
+        ancestors.push(parent);
+        parent = parent.parent;
+    }
+    ancestors.reverse();
+    if (ancestors.length) {
+        const crumbs = h('div', 'ctv-detail-breadcrumb');
+        for (const ancestor of ancestors.slice(-10)) {
+            const variant = ancestor.variants?.get(ancestor.defaultVariantKey) || ancestor.variantList?.[0];
+            const button = h('button', 'ctv-crumb', `#${ancestor.depth} ${ancestor.role === 'user' ? '你' : ancestor.role === 'system' ? '系统' : 'AI'}`);
+            button.title = snippet(variant?.text, 80);
+            button.addEventListener('click', () => {
+                selectNode(ancestor);
+                if (state.settings.viewMode === 'spatial') {
+                    state.spatial?.setSelected(ancestor.id);
+                    state.spatial?.focusNode(ancestor.id);
+                }
+            });
+            crumbs.appendChild(button);
+        }
+        crumbs.appendChild(h('span', 'ctv-crumb ctv-crumb-current', `#${node.depth} 当前`));
+        panel.appendChild(crumbs);
+    }
 
     if (node.variantList.length > 1) {
         const list = h('div', 'ctv-detail-variants');

@@ -524,10 +524,46 @@ function assignLanePositions(rootView, options) {
             }
 
             child.turn = child.displayDepth;
+            child.branchIndex = index;
+            child.siblingCount = children.length;
             child.x = child.lane * options.laneGap;
             child.z = child.layer * options.layerGap;
             child.y = child.displayDepth * options.turnSpacing;
             queue.push(child);
+        }
+    }
+}
+
+function compactLanes(rootView, options) {
+    if (!rootView) {
+        return;
+    }
+    const lanes = new Set();
+    const stack = [rootView];
+    while (stack.length) {
+        const view = stack.pop();
+        if (view.role !== 'root') {
+            lanes.add(view.lane);
+        }
+        for (const child of view.children) {
+            stack.push(child);
+        }
+    }
+    const sorted = Array.from(lanes).sort((a, b) => a - b);
+    const zeroIndex = sorted.indexOf(0);
+    const remap = new Map();
+    sorted.forEach((lane, index) => {
+        remap.set(lane, index - (zeroIndex === -1 ? 0 : zeroIndex));
+    });
+    const stack2 = [rootView];
+    while (stack2.length) {
+        const view = stack2.pop();
+        if (view.role !== 'root' && remap.has(view.lane)) {
+            view.lane = remap.get(view.lane);
+            view.x = view.lane * options.laneGap;
+        }
+        for (const child of view.children) {
+            stack2.push(child);
         }
     }
 }
@@ -569,6 +605,7 @@ export function buildSpatialModel(tree, chatInfo, options = {}) {
     if (rootView) {
         if (opts.layoutMode === 'lane') {
             assignLanePositions(rootView, opts);
+            compactLanes(rootView, opts);
         } else {
             assignPositions(rootView, bases, opts);
         }

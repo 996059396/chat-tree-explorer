@@ -41,6 +41,37 @@ function roleColor(role) {
     return ROLE_COLOR[role] || ROLE_COLOR.assistant;
 }
 
+function roundedPolyline(ctx, points, radius = 9) {
+    if (!points.length) {
+        return;
+    }
+    ctx.moveTo(points[0].x, points[0].y);
+    if (points.length === 2) {
+        ctx.lineTo(points[1].x, points[1].y);
+        return;
+    }
+    for (let index = 1; index < points.length - 1; index++) {
+        const prev = points[index - 1];
+        const point = points[index];
+        const next = points[index + 1];
+        const v1x = point.x - prev.x;
+        const v1y = point.y - prev.y;
+        const v2x = next.x - point.x;
+        const v2y = next.y - point.y;
+        const l1 = Math.hypot(v1x, v1y) || 1;
+        const l2 = Math.hypot(v2x, v2y) || 1;
+        const r = Math.min(radius, l1 / 2, l2 / 2);
+        const ax = point.x - (v1x / l1) * r;
+        const ay = point.y - (v1y / l1) * r;
+        const bx = point.x + (v2x / l2) * r;
+        const by = point.y + (v2y / l2) * r;
+        ctx.lineTo(ax, ay);
+        ctx.quadraticCurveTo(point.x, point.y, bx, by);
+    }
+    const last = points[points.length - 1];
+    ctx.lineTo(last.x, last.y);
+}
+
 function overlap(a, b) {
     return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
 }
@@ -106,11 +137,12 @@ export class SpatialView {
      *   resolveDisplayName?: (chatKey:string)=>string,
      * }} options
      */
-    constructor({ container, onSelectNode, onFocusChat, onExpandSegment, resolveDisplayName }) {
+    constructor({ container, onSelectNode, onFocusChat, onExpandSegment, onSearch, resolveDisplayName }) {
         this.container = container;
         this.onSelectNode = onSelectNode || (() => {});
         this.onFocusChat = onFocusChat || (() => {});
         this.onExpandSegment = onExpandSegment || (() => {});
+        this.onSearch = onSearch || (() => {});
         this.resolveDisplayName = resolveDisplayName || ((key) => key);
 
         this.canvas = document.createElement('canvas');
@@ -122,6 +154,14 @@ export class SpatialView {
         this.tooltip = document.createElement('div');
         this.tooltip.className = 'ctv-spatial-tooltip ctv-hidden';
         container.appendChild(this.tooltip);
+
+        this.minimap = document.createElement('canvas');
+        this.minimap.className = 'ctv-spatial-minimap';
+        this.minimap.title = '小地图：点击/拖动移动镜头';
+        container.appendChild(this.minimap);
+        this.minimapCtx = this.minimap.getContext('2d');
+        this.minimapDrag = false;
+        this.miniMap = null;
 
         this.ctx = this.canvas.getContext('2d');
         this.width = 0;
@@ -138,6 +178,7 @@ export class SpatialView {
             showDivergence: true,
             maxAnchors: 12,
             maxTags: 140,
+            showMinimap: true,
         };
 
         this.selectedNodeId = null;
@@ -217,6 +258,9 @@ export class SpatialView {
 
     setSettings(patch) {
         this.settings = { ...this.settings, ...patch };
+        if (this.minimap) {
+            this.minimap.style.display = this.settings.showMinimap === false ? 'none' : 'block';
+        }
         this.requestRender();
     }
 
@@ -518,8 +562,286 @@ export class SpatialView {
         this.canvas.addEventListener('keydown', (event) => {
             if (event.key === 'r' || event.key === 'R') {
                 this.resetCamera();
+                return;
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                this.moveSelection(event.key === 'ArrowDown' ? 'down' : 'up');
+            } else if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                this.moveSelection(event.key === 'ArrowRight' ? 'next' : 'prev');
+            } else if (event.key === 'Enter') {
+                const current = this.selectedNodeId ? this.resolveViewForNode(this.selectedNodeId) : null;
+                if (current) {
+                    this.focusNode(current.id);
+                }
+            } else if (event.key === 'Home' || event.key === 'End') {
+                event.preventDefault();
+                this.jumpToPathEnd(event.key === 'End');
+            } else if (event.key === 'f' || event.key === 'F') {
+                const current = this.selectedNodeId ? this.resolveViewForNode(this.selectedNodeId) : null;
+                if (current) {
+                    this.focusNode(current.id);
+                } else {
+                    this.fitAll();
+                    this._fitted = true;
+                }
+            } else if (event.key === '/') {
+                event.preventDefault();
+                this.onSearch();
             }
         });
+
+        const jump = (event) => {
+            const rect = this.minimap.getBoundingClientRect();
+            const point = this.minimapToWorld(event.clientX - rect.left, event.clientY - rect.top);
+            if (!point) {
+                return;
+            }
+            this.camera.target.x = point.x;
+            this.camera.target.y = point.y;
+            this.goal.target = { ...this.camera.target };
+            this.requestRender();
+        };
+        this.minimap.addEventListener('pointerdown', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.minimap.setPointerCapture?.(event.pointerId);
+            this.minimapDrag = true;
+            jump(event);
+        });
+        this.minimap.addEventListener('pointermove', (event) => {
+            if (!this.minimapDrag) {
+                return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            jump(event);
+        });
+        this.minimap.addEventListener('pointerup', () => {
+            this.minimapDrag = false;
+        });
+        this.minimap.addEventListener('pointercancel', () => {
+            this.minimapDrag = false;
+        });
+    }
+
+    moveSelection(direction) {
+        if (!this.model) {
+            return;
+        }
+        let current = this.selectedNodeId ? this.resolveViewForNode(this.selectedNodeId) : null;
+        if (!current) {
+            const focusPath = this.focusChatKey ? this.model.chatPaths.get(this.focusChatKey) : null;
+            current = focusPath?.[0] || this.model.nodes.find((view) => view.role !== 'root') || null;
+            if (current) {
+                this.selectAndCenter(current);
+            }
+            return;
+        }
+
+        let target = null;
+        if (direction === 'down') {
+            const focus = this.focusChatKey;
+            target = current.children.find((child) => focus && child.ref.chats?.has(focus))
+                || current.children[0]
+                || null;
+        } else if (direction === 'up') {
+            target = current.parent && current.parent.role !== 'root' ? current.parent : null;
+        } else {
+            const parent = current.parent;
+            if (!parent || !parent.children.length) {
+                return;
+            }
+            const index = parent.children.indexOf(current);
+            const offset = direction === 'next' ? 1 : -1;
+            target = parent.children[(index + offset + parent.children.length) % parent.children.length];
+        }
+
+        if (target) {
+            this.selectAndCenter(target);
+        }
+    }
+
+    jumpToPathEnd(toEnd) {
+        if (!this.model) {
+            return;
+        }
+        const focusPath = this.focusChatKey ? this.model.chatPaths.get(this.focusChatKey) : null;
+        let target = focusPath
+            ? focusPath[toEnd ? focusPath.length - 1 : 0]
+            : null;
+        if (!target) {
+            const nodes = this.model.nodes.filter((view) => view.role !== 'root');
+            target = nodes.reduce((best, view) => {
+                if (!best) return view;
+                if (toEnd) return view.y > best.y ? view : best;
+                return view.y < best.y ? view : best;
+            }, null);
+        }
+        if (target) {
+            this.selectAndCenter(target);
+        }
+    }
+
+    selectAndCenter(view) {
+        this.onSelectNode(view.ref);
+        this.selectedNodeId = view.id;
+        this.goal.target = { x: view.x, y: view.y, z: view.z };
+        this.startAnimation();
+    }
+
+    minimapToWorld(localX, localY) {
+        if (!this.miniMap) {
+            return null;
+        }
+        const { minX, minY, scale, ox, oy } = this.miniMap;
+        return {
+            x: minX + (localX - ox) / scale,
+            y: minY + (localY - oy) / scale,
+        };
+    }
+
+    renderMinimap() {
+        const canvas = this.minimap;
+        const ctx = this.minimapCtx;
+        if (!canvas || !ctx || !this.model) {
+            return;
+        }
+        if (this.settings.showMinimap === false) {
+            this.minimap.style.display = 'none';
+            return;
+        }
+        this.minimap.style.display = 'block';
+
+        const cssW = canvas.clientWidth || 200;
+        const cssH = canvas.clientHeight || 130;
+        const dpr = this.dpr;
+        if (canvas.width !== Math.floor(cssW * dpr) || canvas.height !== Math.floor(cssH * dpr)) {
+            canvas.width = Math.floor(cssW * dpr);
+            canvas.height = Math.floor(cssH * dpr);
+        }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, cssW, cssH);
+
+        const bounds = this.model.bounds;
+        const pad = 10;
+        const worldW = Math.max(1, bounds.maxX - bounds.minX);
+        const worldH = Math.max(1, bounds.maxY - bounds.minY);
+        const scale = Math.min((cssW - pad * 2) / worldW, (cssH - pad * 2) / worldH);
+        const ox = (cssW - worldW * scale) / 2 - bounds.minX * scale;
+        const oy = (cssH - worldH * scale) / 2 - bounds.minY * scale;
+        this.miniMap = { minX: bounds.minX, minY: bounds.minY, scale, ox, oy };
+
+        const mapX = (x) => ox + x * scale;
+        const mapY = (y) => oy + y * scale;
+
+        const focus = this.focusChatKey;
+
+        // Lane stripes: one column per branch lane, active depth range only.
+        const laneGroups = new Map();
+        for (const view of this.model.nodes) {
+            if (view.role === 'root') {
+                continue;
+            }
+            const lane = view.lane ?? 0;
+            const group = laneGroups.get(lane) || {
+                minY: Infinity,
+                maxY: -Infinity,
+                chats: new Set(),
+            };
+            group.minY = Math.min(group.minY, view.y);
+            group.maxY = Math.max(group.maxY, view.y);
+            for (const chatKey of view.ref.chats || []) {
+                group.chats.add(chatKey);
+            }
+            laneGroups.set(lane, group);
+        }
+        for (const [lane, group] of laneGroups) {
+            const laneX = lane * this.model.options.laneGap;
+            const firstChat = group.chats.size === 1 ? Array.from(group.chats)[0] : null;
+            const info = firstChat ? this.chatInfo.get(firstChat) : null;
+            ctx.strokeStyle = group.chats.size > 1
+                ? 'rgba(130,170,230,0.2)'
+                : `hsla(${info?.hue ?? 210},70%,60%,0.28)`;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(mapX(laneX), mapY(group.minY));
+            ctx.lineTo(mapX(laneX), mapY(group.maxY));
+            ctx.stroke();
+        }
+
+        // Focused path (gold/chat colour) so the minimap doubles as a locator.
+        if (focus) {
+            const path = this.model.chatPaths.get(focus);
+            const info = this.chatInfo.get(focus);
+            if (path && path.length) {
+                ctx.strokeStyle = `hsla(${info?.hue ?? 210},75%,62%,0.8)`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                path.forEach((view, index) => {
+                    const x = mapX(view.x);
+                    const y = mapY(view.y);
+                    if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+            }
+        }
+
+        // Fork ticks.
+        for (const view of this.model.nodes) {
+            if (view.role === 'root' || view.children.length < 2) {
+                continue;
+            }
+            ctx.fillStyle = 'rgba(255,214,120,0.7)';
+            ctx.fillRect(mapX(view.x) - 1.5, mapY(view.y) - 1.5, 3, 3);
+        }
+
+        ctx.strokeStyle = 'rgba(120,160,220,0.22)';
+        ctx.lineWidth = 1;
+        for (const edge of this.model.edges) {
+            if (focus && !(edge.child.ref.chats && edge.child.ref.chats.has(focus))) {
+                continue;
+            }
+            ctx.beginPath();
+            ctx.moveTo(mapX(edge.parent.x), mapY(edge.parent.y));
+            ctx.lineTo(mapX(edge.child.x), mapY(edge.child.y));
+            ctx.stroke();
+        }
+
+        for (const view of this.model.nodes) {
+            if (view.role === 'root') {
+                continue;
+            }
+            const role = roleColor(view.role);
+            const focused = !focus || (view.ref.chats && view.ref.chats.has(focus));
+            ctx.fillStyle = focused ? rgba(role, 0.85) : rgba(role, 0.16);
+            const r = view.segmentNodes ? 2.4 : view.chatCount > 1 ? 1.8 : 1.3;
+            ctx.beginPath();
+            ctx.arc(mapX(view.x), mapY(view.y), r, 0, Math.PI * 2);
+            ctx.fill();
+            if (view.id === this.selectedNodeId) {
+                ctx.strokeStyle = 'rgba(255,224,140,0.95)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.arc(mapX(view.x), mapY(view.y), r + 2, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+
+        // Viewport approximation.
+        const worldHeight = 2 * this.camera.distance * Math.tan(FOV / 2);
+        const worldWidth = worldHeight * (this.width / Math.max(1, this.height));
+        const cx = this.camera.target.x;
+        const cy = this.camera.target.y;
+        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(
+            mapX(cx - worldWidth / 2),
+            mapY(cy - worldHeight / 2),
+            Math.max(6, worldWidth * scale),
+            Math.max(4, worldHeight * scale),
+        );
     }
 
     onPointerDown(event) {
@@ -834,6 +1156,7 @@ export class SpatialView {
         this.drawDivergenceMarkers(ctx);
         this.drawAnchors(ctx);
         this.drawFocusOverlay(ctx);
+        this.renderMinimap();
     }
 
     drawBackground(ctx) {
@@ -893,13 +1216,19 @@ export class SpatialView {
             line({ x, y: groundY, z: z0 }, { x, y: groundY, z: z1 }, 'rgba(110,150,220,0.07)');
         }
 
+        // Adaptive tick step (vis-timeline scale-ladder pattern).
+        const axisA = this.project({ x: 0, y: 0, z: 0 }, basis);
+        const axisB = this.project({ x: 0, y: opts.turnSpacing, z: 0 }, basis);
+        const pxPerTurn = axisA && axisB ? Math.abs(axisB.y - axisA.y) : 8;
+        const step = [1, 2, 5, 10, 20, 50, 100, 200].find((value) => value * pxPerTurn >= 36) || 200;
+
         // Back wall: a vertical X/Y grid makes the time axis unmistakable.
         const backZ = z0;
-        const maxTurnEstimate = Math.ceil(this.model.stats.maxDepth / 10) * 10;
+        const maxTurnEstimate = Math.ceil(this.model.stats.maxDepth / step) * step;
         for (let x = x0; x <= x1 + 0.01; x += opts.laneGap) {
             line({ x, y: 0, z: backZ }, { x, y: maxTurnEstimate * opts.turnSpacing, z: backZ }, 'rgba(110,150,220,0.04)');
         }
-        for (let turn = 0; turn <= maxTurnEstimate; turn += 5) {
+        for (let turn = 0; turn <= maxTurnEstimate; turn += step) {
             const y = turn * opts.turnSpacing;
             line({ x: x0, y, z: backZ }, { x: x1, y, z: backZ }, 'rgba(140,180,255,0.06)');
         }
@@ -915,7 +1244,7 @@ export class SpatialView {
         ctx.moveTo(12, 10);
         ctx.lineTo(12, this.height - 10);
         ctx.stroke();
-        for (let turn = 0; turn <= maxTurnEstimate; turn += 5) {
+        for (let turn = 0; turn <= maxTurnEstimate; turn += step) {
             const p = this.project({ x: 0, y: turn * opts.turnSpacing, z: 0 }, basis);
             if (!p || p.y < 0 || p.y > this.height) {
                 continue;
@@ -935,9 +1264,7 @@ export class SpatialView {
         ctx.textBaseline = 'top';
         ctx.fillText('时间 ↓', 12, 2);
 
-        // Horizontal depth planes + turn labels: makes "which turn is first"
-        // readable even while orbiting.
-        const step = 10;
+        // Horizontal depth planes + turn labels.
         const maxTurn = Math.ceil(this.model.stats.maxDepth / step) * step;
         for (let turn = 0; turn <= maxTurn; turn += step) {
             const y = turn * opts.turnSpacing;
@@ -960,7 +1287,7 @@ export class SpatialView {
         for (let z = z0; z <= z1 + 0.01; z += opts.layerGap) {
             line({ x: sideX, y: 0, z }, { x: sideX, y: maxTurnEstimate * opts.turnSpacing, z }, 'rgba(110,150,220,0.035)');
         }
-        for (let turn = 0; turn <= maxTurnEstimate; turn += 10) {
+        for (let turn = 0; turn <= maxTurnEstimate; turn += step) {
             const y = turn * opts.turnSpacing;
             line({ x: sideX, y, z: z0 }, { x: sideX, y, z: z1 }, 'rgba(140,180,255,0.04)');
         }
@@ -1089,7 +1416,13 @@ export class SpatialView {
                     { x: child.x, y: child.y, z: child.z },
                 );
             } else {
-                const midY = parent.y + (child.y - parent.y) * 0.45;
+                // Fan the horizontal transition across the fork so sibling
+                // curves do not overlap at the same row (git-graph "lockedFirst"
+                // idea). The largest subtree stays near the source.
+                const ratio = child.siblingCount > 1
+                    ? 0.24 + 0.52 * ((child.branchIndex + 1) / (child.siblingCount + 1))
+                    : 0.45;
+                const midY = parent.y + (child.y - parent.y) * ratio;
                 points.push(
                     { x: parent.x, y: parent.y, z: parent.z },
                     { x: parent.x, y: midY, z: parent.z },
@@ -1108,10 +1441,7 @@ export class SpatialView {
             ctx.lineJoin = 'round';
             ctx.lineCap = 'round';
             ctx.beginPath();
-            ctx.moveTo(projected[0].x, projected[0].y);
-            for (let index = 1; index < projected.length; index++) {
-                ctx.lineTo(projected[index].x, projected[index].y);
-            }
+            roundedPolyline(ctx, projected, 10);
             ctx.stroke();
 
             const arrowAlpha = Math.min(1, alpha * fog * 1.8);
@@ -1201,7 +1531,9 @@ export class SpatialView {
             let alpha = fog * (relatedToFocus ? 1 : 0.12);
             if (view.role === 'assistant') alpha *= 0.92;
 
-            const baseRadius = view.segmentNodes ? 4.2 : view.chatCount > 1 ? 3.8 : 3.0;
+            const baseRadius = view.segmentNodes
+                ? 4.4
+                : 2.4 + Math.min(5.0, Math.sqrt(Math.max(1, view.chatCount)) * 1.15);
             const radius = clamp(baseRadius * Math.sqrt(Math.max(0.3, entry.scale / 8)), 1.8, 7);
             const role = roleColor(view.role);
 
@@ -1634,5 +1966,6 @@ export class SpatialView {
         this.resizeObserver?.disconnect();
         this.canvas.remove();
         this.tooltip.remove();
+        this.minimap.remove();
     }
 }

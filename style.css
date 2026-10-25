@@ -577,6 +577,34 @@
     opacity: 0.65;
 }
 
+#ctv-overlay .ctv-detail-breadcrumb {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+}
+
+#ctv-overlay .ctv-crumb {
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #444) 70%, transparent);
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: inherit;
+    border-radius: 999px;
+    padding: 1px 7px;
+    cursor: pointer;
+    font-size: 10.5px;
+    white-space: nowrap;
+}
+
+#ctv-overlay .ctv-crumb:hover {
+    background: color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 18%, transparent);
+}
+
+#ctv-overlay .ctv-crumb-current {
+    border-color: color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 55%, transparent);
+    cursor: default;
+}
+
 #ctv-overlay .ctv-detail-variants {
     display: flex;
     flex-direction: column;
@@ -770,6 +798,20 @@
     outline: none;
 }
 
+#ctv-overlay .ctv-spatial-minimap {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 3;
+    width: 200px;
+    height: 130px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeEmColor, #7aa2f7) 32%, transparent);
+    border-radius: 8px;
+    background: rgba(8, 12, 22, 0.78);
+    cursor: crosshair;
+    touch-action: none;
+}
+
 #ctv-overlay .ctv-spatial-toolbar {
     position: absolute;
     top: 8px;
@@ -899,6 +941,13 @@
     #ctv-overlay .ctv-focus-chip {
         max-width: 70vw;
         order: 8;
+    }
+
+    #ctv-overlay .ctv-spatial-minimap {
+        width: 140px;
+        height: 92px;
+        right: 6px;
+        bottom: 6px;
     }
 
     #ctv-overlay .ctv-sidebar {
