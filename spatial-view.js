@@ -196,6 +196,7 @@ export class SpatialView {
             maxAnchors: 12,
             maxTags: 140,
             showMinimap: true,
+            showLaneHeaders: true,
         };
 
         this.selectedNodeId = null;
@@ -226,6 +227,7 @@ export class SpatialView {
         this.textCache = truncateCache();
         this.screenNodes = [];
         this.screenAnchors = [];
+        this.laneHeaders = [];
         this.starfield = null;
         this.resizeObserver = null;
         this.autoRotatePhase = 0;
@@ -952,6 +954,14 @@ export class SpatialView {
                 this.requestRender();
             } else if (hit?.type === 'anchor') {
                 this.onFocusChat(hit.anchor.chatKey);
+            } else if (hit?.type === 'header') {
+                if (hit.header.chatKey) {
+                    this.onFocusChat(hit.header.chatKey);
+                } else {
+                    this.onSelectNode(hit.header.view.ref);
+                    this.selectedNodeId = hit.header.view.id;
+                    this.requestRender();
+                }
             }
         }
     }
@@ -1023,6 +1033,14 @@ export class SpatialView {
                 return { type: 'anchor', anchor: anchor.anchor };
             }
         }
+
+        for (let index = this.laneHeaders.length - 1; index >= 0; index--) {
+            const header = this.laneHeaders[index];
+            const r = header.rect;
+            if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+                return { type: 'header', header };
+            }
+        }
         return null;
     }
 
@@ -1032,7 +1050,7 @@ export class SpatialView {
             this.setHover(hit.view.id);
             this.showTooltip(hit.view, clientX, clientY);
             this.canvas.style.cursor = 'pointer';
-        } else if (hit?.type === 'anchor') {
+        } else if (hit?.type === 'anchor' || hit?.type === 'header') {
             this.setHover(null);
             this.hideTooltip();
             this.canvas.style.cursor = 'pointer';
@@ -1173,6 +1191,7 @@ export class SpatialView {
         this.drawNodes(ctx, focal);
         this.drawDivergenceMarkers(ctx);
         this.drawAnchors(ctx);
+        this.drawLaneHeaders(ctx, basis);
         this.drawFocusOverlay(ctx);
         this.renderMinimap();
     }
@@ -1955,6 +1974,144 @@ export class SpatialView {
             ctx.lineWidth = 1.1;
             ctx.strokeRect(-r / 2, -r / 2, r, r);
             ctx.restore();
+        }
+    }
+
+    drawLaneHeaders(ctx, basis) {
+        this.laneHeaders = [];
+        if (!this.settings.showLaneHeaders || !this.model) {
+            return;
+        }
+
+        const groups = new Map();
+        for (const view of this.model.nodes) {
+            if (view.role === 'root') {
+                continue;
+            }
+            const key = `${view.lane}:${view.layer}`;
+            const group = groups.get(key) || { view: null };
+            if (
+                !group.view
+                || view.y < group.view.y
+                || (view.y === group.view.y && view.x < group.view.x)
+            ) {
+                group.view = view;
+            }
+            groups.set(key, group);
+        }
+
+        const items = [];
+        for (const group of groups.values()) {
+            const view = group.view;
+            if (!view) {
+                continue;
+            }
+            const projected = this.project(view, basis);
+            if (
+                !projected
+                || projected.x < -40 || projected.x > this.width + 40
+                || projected.y < -40 || projected.y > this.height + 40
+            ) {
+                continue;
+            }
+            const chats = view.ref.chats ? Array.from(view.ref.chats) : [];
+            const single = chats.length === 1 ? chats[0] : null;
+            const info = single ? this.chatInfo.get(single) : null;
+            let label = single
+                ? this.resolveDisplayName(single)
+                : String(view.displayText || view.text || '').replace(/\s+/g, ' ').trim();
+            if (!label) {
+                label = `#${view.turn ?? view.displayDepth}`;
+            }
+            items.push({
+                view,
+                projected,
+                label,
+                single,
+                hue: info?.hue ?? 210,
+                focused: Boolean(single && this.focusChatKey === single),
+            });
+        }
+
+        items.sort((a, b) => a.projected.x - b.projected.x);
+        const maxRight = this.width - (this.width < 600 ? 96 : 176);
+        let cursor = 44;
+        let overflow = 0;
+
+        for (const item of items) {
+            if (this.laneHeaders.length >= 12) {
+                overflow++;
+                continue;
+            }
+            const width = clamp(64 + Math.min(24, item.label.length) * 6, 84, 190);
+            const height = 18;
+            let x = item.projected.x - width / 2;
+            if (x < cursor) {
+                x = cursor;
+            }
+            if (x + width > maxRight) {
+                overflow++;
+                continue;
+            }
+            const y = 6;
+            const rect = { x, y, w: width, h: height };
+
+            ctx.strokeStyle = `hsla(${item.hue},70%,62%,0.22)`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x + width / 2, y + height);
+            ctx.lineTo(item.projected.x, item.projected.y);
+            ctx.stroke();
+
+            ctx.fillStyle = 'rgba(8,12,22,0.84)';
+            roundRectPath(ctx, x, y, width, height, 5);
+            ctx.fill();
+            ctx.strokeStyle = item.focused
+                ? 'rgba(255,214,120,0.92)'
+                : `hsla(${item.hue},70%,62%,0.5)`;
+            ctx.lineWidth = item.focused ? 1.4 : 1;
+            roundRectPath(ctx, x, y, width, height, 5);
+            ctx.stroke();
+            ctx.fillStyle = `hsl(${item.hue},70%,62%)`;
+            ctx.fillRect(x, y, 3, height);
+
+            ctx.font = `8.5px ${FONT_STACK}`;
+            ctx.fillStyle = 'rgba(150,190,255,0.55)';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(`L${item.view.layer}`, x + 7, y + height / 2 + 0.5);
+
+            ctx.font = `9.5px ${FONT_STACK}`;
+            ctx.fillStyle = `rgba(215,230,250,${item.focused ? 0.98 : 0.86})`;
+            ctx.fillText(
+                fitText(ctx, item.label, width - 34, this.textCache),
+                x + 24,
+                y + height / 2 + 0.5,
+            );
+
+            this.laneHeaders.push({ rect, view: item.view, chatKey: item.single });
+            cursor = x + width + 4;
+        }
+
+        if (overflow > 0) {
+            const width = 36;
+            const height = 18;
+            const x = Math.min(cursor, maxRight - width);
+            const y = 6;
+            if (x >= 44) {
+                ctx.fillStyle = 'rgba(8,12,22,0.84)';
+                roundRectPath(ctx, x, y, width, height, 5);
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(150,190,255,0.4)';
+                ctx.lineWidth = 1;
+                roundRectPath(ctx, x, y, width, height, 5);
+                ctx.stroke();
+                ctx.font = `9.5px ${FONT_STACK}`;
+                ctx.fillStyle = 'rgba(190,210,240,0.8)';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`+${overflow}`, x + width / 2, y + height / 2 + 0.5);
+                ctx.textAlign = 'start';
+            }
         }
     }
 

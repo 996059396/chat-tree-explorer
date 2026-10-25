@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS = {
     spatialHideSystem: true,
     spatialShowAnchors: true,
     spatialShowMinimap: true,
+    spatialShowLaneHeaders: true,
     spatialTimeMode: 'turn',
     spatialLaneScope: 'layer',
     spatialShowAllStrands: false,
@@ -121,6 +122,7 @@ function loadSettings() {
         merged.spatialHideSystem = Boolean(merged.spatialHideSystem);
         merged.spatialShowAnchors = Boolean(merged.spatialShowAnchors);
         merged.spatialShowMinimap = Boolean(merged.spatialShowMinimap);
+        merged.spatialShowLaneHeaders = Boolean(merged.spatialShowLaneHeaders);
         merged.spatialTimeMode = merged.spatialTimeMode === 'timestamp' ? 'timestamp' : 'turn';
         merged.spatialLaneScope = merged.spatialLaneScope === 'global' ? 'global' : 'layer';
         merged.spatialShowAllStrands = Boolean(merged.spatialShowAllStrands);
@@ -631,6 +633,7 @@ function buildOverlay() {
                         <label class="ctv-option"><input type="checkbox" data-option="spatialHideSystem" /> <span>隐藏系统消息</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialShowAnchors" /> <span>显示聊天锚点</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialShowMinimap" /> <span>显示小地图</span></label>
+                        <label class="ctv-option"><input type="checkbox" data-option="spatialShowLaneHeaders" /> <span>显示车道标题</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialShowAllStrands" /> <span>显示所有聊天丝线</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialAutoRotate" /> <span>自动旋转</span></label>
                         <div class="ctv-option-row">
@@ -791,7 +794,7 @@ function buildOverlay() {
             } else if (key === 'spatialHideStructured' || key === 'spatialHideSystem' || key === 'spatialTimeMode' || key === 'spatialLaneScope') {
                 rebuildSpatialModel();
                 applyViewMode();
-            } else if (key === 'spatialShowAnchors' || key === 'spatialShowMinimap' || key === 'spatialShowAllStrands' || key === 'spatialAutoRotate') {
+            } else if (key === 'spatialShowAnchors' || key === 'spatialShowMinimap' || key === 'spatialShowLaneHeaders' || key === 'spatialShowAllStrands' || key === 'spatialAutoRotate') {
                 syncSpatialSettings();
             } else {
                 scheduleRebuild();
@@ -1255,6 +1258,7 @@ function syncSpatialSettings() {
     state.spatial?.setSettings({
         showAnchors: state.settings.spatialShowAnchors,
         showMinimap: state.settings.spatialShowMinimap,
+        showLaneHeaders: state.settings.spatialShowLaneHeaders,
         showAllStrands: state.settings.spatialShowAllStrands,
         autoRotate: state.settings.spatialAutoRotate,
     });
