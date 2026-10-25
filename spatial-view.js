@@ -25,6 +25,23 @@ const SHARED_COLOR = { r: 138, g: 178, b: 255 };
 const FONT_STACK = '-apple-system, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
 const FOV = Math.PI / 4.5;
 
+function formatTimeShort(epoch) {
+    const value = Number(epoch);
+    if (!Number.isFinite(value) || value <= 0) {
+        return '';
+    }
+    try {
+        return new Intl.DateTimeFormat('zh-CN', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        }).format(new Date(value));
+    } catch {
+        return '';
+    }
+}
+
 function clamp(value, min, max) {
     return value < min ? min : value > max ? max : value;
 }
@@ -1183,17 +1200,100 @@ export class SpatialView {
         ctx.globalAlpha = 1;
     }
 
+    buildAxisTicks(basis) {
+        const options = this.model.options;
+        const projectY = (y) => this.project({ x: 0, y, z: 0 }, basis);
+
+        if (options.timeMode === 'timestamp') {
+            const byTime = new Map();
+            for (const view of this.model.nodes) {
+                if (view.role === 'root' || !view.timeMin) {
+                    continue;
+                }
+                const previous = byTime.get(view.timeMin);
+                if (previous === undefined || view.y < previous) {
+                    byTime.set(view.timeMin, view.y);
+                }
+            }
+            const entries = Array.from(byTime, ([time, y]) => ({ time, y })).sort((a, b) => a.y - b.y);
+            const ticks = [];
+            let lastScreenY = -Infinity;
+            for (const entry of entries) {
+                const projected = projectY(entry.y);
+                if (!projected) {
+                    continue;
+                }
+                if (projected.y - lastScreenY >= 36) {
+                    ticks.push({ y: entry.y, label: formatTimeShort(entry.time) });
+                    lastScreenY = projected.y;
+                }
+            }
+            if (ticks.length >= 2) {
+                return ticks;
+            }
+        }
+
+        const maxDepth = this.model.stats.maxDepth;
+        const a = projectY(0);
+        const b = projectY(options.turnSpacing);
+        const pxPerTurn = a && b ? Math.abs(b.y - a.y) : 8;
+        const step = [1, 2, 5, 10, 20, 50, 100, 200].find((value) => value * pxPerTurn >= 36) || 200;
+        const ticks = [];
+        for (let turn = 0; turn <= maxDepth; turn += step) {
+            ticks.push({ y: turn * options.turnSpacing, label: `#${turn}` });
+        }
+        return ticks;
+    }
+
+    drawDensity(ctx, basis) {
+        const { minY, maxY } = this.model.bounds;
+        const span = Math.max(1, maxY - minY);
+        const bucketCount = 48;
+        const counts = new Array(bucketCount).fill(0);
+        for (const view of this.model.nodes) {
+            if (view.role === 'root') {
+                continue;
+            }
+            const index = Math.min(
+                bucketCount - 1,
+                Math.max(0, Math.floor(((view.y - minY) / span) * bucketCount)),
+            );
+            const weight = view.segmentNodes
+                ? Math.max(1, view.segmentCount)
+                : Math.max(1, view.ref.occurrences?.length || 1);
+            counts[index] += weight;
+        }
+        const max = Math.max(1, ...counts);
+        for (let index = 0; index < bucketCount; index++) {
+            if (!counts[index]) {
+                continue;
+            }
+            const y = minY + ((index + 0.5) / bucketCount) * span;
+            const projected = this.project({ x: 0, y, z: 0 }, basis);
+            if (!projected || projected.y < 0 || projected.y > this.height) {
+                continue;
+            }
+            const ratio = counts[index] / max;
+            const width = 2 + 7 * ratio;
+            const height = Math.max(2, Math.min(6, (this.height / bucketCount) * 0.6));
+            ctx.fillStyle = `rgba(130,180,255,${(0.1 + 0.4 * ratio).toFixed(3)})`;
+            ctx.fillRect(2, projected.y - height / 2, width, height);
+        }
+    }
+
     drawGround(ctx, basis) {
         if (!this.model) {
             return;
         }
-        const { minX, maxX, maxY, minZ, maxZ } = this.model.bounds;
-        const opts = this.model.options;
-        const groundY = maxY + opts.turnSpacing * 2.5;
-        const x0 = minX - opts.laneGap * 2;
-        const x1 = maxX + opts.laneGap * 2;
-        const z0 = minZ - opts.layerGap * 2;
-        const z1 = maxZ + opts.layerGap * 2;
+        const { minX, maxX, minY, maxY, minZ, maxZ } = this.model.bounds;
+        const options = this.model.options;
+        const groundY = maxY + options.turnSpacing * 2.5;
+        const x0 = minX - options.laneGap * 2;
+        const x1 = maxX + options.laneGap * 2;
+        const z0 = minZ - options.layerGap * 2;
+        const z1 = maxZ + options.layerGap * 2;
+        const topY = Math.min(0, minY);
+        const bottomY = Math.max(maxY, groundY);
 
         const line = (a, b, style, width = 1) => {
             const pa = this.project(a, basis);
@@ -1209,102 +1309,91 @@ export class SpatialView {
             ctx.stroke();
         };
 
-        // Ground grid: gives the eye a stable floor for depth perception.
-        for (let z = z0; z <= z1 + 0.01; z += opts.layerGap) {
+        // Ground grid.
+        for (let z = z0; z <= z1 + 0.01; z += options.layerGap) {
             line({ x: x0, y: groundY, z }, { x: x1, y: groundY, z }, 'rgba(110,150,220,0.07)');
         }
-        for (let x = x0; x <= x1 + 0.01; x += opts.laneGap) {
+        for (let x = x0; x <= x1 + 0.01; x += options.laneGap) {
             line({ x, y: groundY, z: z0 }, { x, y: groundY, z: z1 }, 'rgba(110,150,220,0.07)');
         }
 
-        // Adaptive tick step (vis-timeline scale-ladder pattern).
-        const axisA = this.project({ x: 0, y: 0, z: 0 }, basis);
-        const axisB = this.project({ x: 0, y: opts.turnSpacing, z: 0 }, basis);
-        const pxPerTurn = axisA && axisB ? Math.abs(axisB.y - axisA.y) : 8;
-        const step = [1, 2, 5, 10, 20, 50, 100, 200].find((value) => value * pxPerTurn >= 36) || 200;
+        const ticks = this.buildAxisTicks(basis);
 
-        // Back wall: a vertical X/Y grid makes the time axis unmistakable.
-        const backZ = z0;
-        const maxTurnEstimate = Math.ceil(this.model.stats.maxDepth / step) * step;
-        for (let x = x0; x <= x1 + 0.01; x += opts.laneGap) {
-            line({ x, y: 0, z: backZ }, { x, y: maxTurnEstimate * opts.turnSpacing, z: backZ }, 'rgba(110,150,220,0.04)');
+        // Back wall.
+        for (let x = x0; x <= x1 + 0.01; x += options.laneGap) {
+            line({ x, y: topY, z: z0 }, { x, y: bottomY, z: z0 }, 'rgba(110,150,220,0.04)');
         }
-        for (let turn = 0; turn <= maxTurnEstimate; turn += step) {
-            const y = turn * opts.turnSpacing;
-            line({ x: x0, y, z: backZ }, { x: x1, y, z: backZ }, 'rgba(140,180,255,0.06)');
+        for (const tick of ticks) {
+            line({ x: x0, y: tick.y, z: z0 }, { x: x1, y: tick.y, z: z0 }, 'rgba(140,180,255,0.06)');
         }
         line(
-            { x: x0 - 1.5, y: 0, z: backZ },
-            { x: x0 - 1.5, y: maxTurnEstimate * opts.turnSpacing, z: backZ },
+            { x: x0 - 1.5, y: topY, z: z0 },
+            { x: x0 - 1.5, y: bottomY, z: z0 },
             'rgba(150,190,255,0.22)',
         );
-        // Screen-space time ruler: always readable regardless of camera yaw.
+
+        // Screen-space ruler.
         ctx.strokeStyle = 'rgba(150,190,255,0.16)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(12, 10);
         ctx.lineTo(12, this.height - 10);
         ctx.stroke();
-        for (let turn = 0; turn <= maxTurnEstimate; turn += step) {
-            const p = this.project({ x: 0, y: turn * opts.turnSpacing, z: 0 }, basis);
-            if (!p || p.y < 0 || p.y > this.height) {
+        for (const tick of ticks) {
+            const projected = this.project({ x: 0, y: tick.y, z: 0 }, basis);
+            if (!projected || projected.y < 0 || projected.y > this.height) {
                 continue;
             }
             ctx.strokeStyle = 'rgba(150,190,255,0.24)';
             ctx.beginPath();
-            ctx.moveTo(12, p.y);
-            ctx.lineTo(22, p.y);
+            ctx.moveTo(12, projected.y);
+            ctx.lineTo(22, projected.y);
             ctx.stroke();
             ctx.font = `9px ${FONT_STACK}`;
-            ctx.fillStyle = 'rgba(150,190,255,0.55)';
+            ctx.fillStyle = 'rgba(150,190,255,0.58)';
             ctx.textBaseline = 'middle';
-            ctx.fillText(`#${turn}`, 26, p.y);
+            ctx.fillText(tick.label, 26, projected.y);
         }
         ctx.font = `9px ${FONT_STACK}`;
         ctx.fillStyle = 'rgba(150,190,255,0.6)';
         ctx.textBaseline = 'top';
-        ctx.fillText('时间 ↓', 12, 2);
+        ctx.fillText(options.timeMode === 'timestamp' ? '时间轴' : '时间 ↓', 12, 2);
 
-        // Horizontal depth planes + turn labels.
-        const maxTurn = Math.ceil(this.model.stats.maxDepth / step) * step;
-        for (let turn = 0; turn <= maxTurn; turn += step) {
-            const y = turn * opts.turnSpacing;
-            line({ x: x0, y, z: z0 }, { x: x1, y, z: z0 }, 'rgba(140,180,255,0.07)');
-            line({ x: x0, y, z: z1 }, { x: x1, y, z: z1 }, 'rgba(140,180,255,0.07)');
-            line({ x: x0, y, z: z0 }, { x: x0, y, z: z1 }, 'rgba(140,180,255,0.05)');
-            line({ x: x1, y, z: z0 }, { x: x1, y, z: z1 }, 'rgba(140,180,255,0.05)');
-            const label = this.project({ x: x0 - 1.5, y, z: z0 }, basis);
-            if (label && label.x > -50 && label.x < this.width + 50 && label.y > -50 && label.y < this.height + 50) {
-                ctx.font = `10px ${FONT_STACK}`;
-                ctx.fillStyle = 'rgba(150,190,255,0.42)';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(`#${turn}`, label.x, label.y);
-            }
+        this.drawDensity(ctx, basis);
+
+        // Horizontal depth planes.
+        for (const tick of ticks) {
+            line({ x: x0, y: tick.y, z: z0 }, { x: x1, y: tick.y, z: z0 }, 'rgba(140,180,255,0.05)');
+            line({ x: x0, y: tick.y, z: z1 }, { x: x1, y: tick.y, z: z1 }, 'rgba(140,180,255,0.05)');
+            line({ x: x0, y: tick.y, z: z0 }, { x: x0, y: tick.y, z: z1 }, 'rgba(140,180,255,0.04)');
+            line({ x: x1, y: tick.y, z: z0 }, { x: x1, y: tick.y, z: z1 }, 'rgba(140,180,255,0.04)');
         }
 
-        // Side wall (Y/Z grid) + layer labels: makes the front/back (Z)
-        // relation explicit, complementing the vertical time ruler.
+        // Side wall + layer labels.
         const sideX = x1;
-        for (let z = z0; z <= z1 + 0.01; z += opts.layerGap) {
-            line({ x: sideX, y: 0, z }, { x: sideX, y: maxTurnEstimate * opts.turnSpacing, z }, 'rgba(110,150,220,0.035)');
+        for (let z = z0; z <= z1 + 0.01; z += options.layerGap) {
+            line({ x: sideX, y: topY, z }, { x: sideX, y: bottomY, z }, 'rgba(110,150,220,0.035)');
         }
-        for (let turn = 0; turn <= maxTurnEstimate; turn += step) {
-            const y = turn * opts.turnSpacing;
-            line({ x: sideX, y, z: z0 }, { x: sideX, y, z: z1 }, 'rgba(140,180,255,0.04)');
+        for (const tick of ticks) {
+            line({ x: sideX, y: tick.y, z: z0 }, { x: sideX, y: tick.y, z: z1 }, 'rgba(140,180,255,0.04)');
         }
-        const layerCount = Math.max(1, Math.ceil((z1 - z0) / opts.layerGap));
+        const layerCount = Math.max(1, Math.ceil((z1 - z0) / options.layerGap));
         for (let layer = 0; layer <= layerCount; layer++) {
-            const z = z0 + layer * opts.layerGap;
-            const p = this.project({ x: sideX + 1, y: 0, z }, basis);
-            if (p && p.x > -50 && p.x < this.width + 50 && p.y > -50 && p.y < this.height + 50) {
+            const z = z0 + layer * options.layerGap;
+            const projected = this.project({ x: sideX + 1, y: 0, z }, basis);
+            if (
+                projected
+                && projected.x > -50 && projected.x < this.width + 50
+                && projected.y > -50 && projected.y < this.height + 50
+            ) {
                 ctx.font = `9px ${FONT_STACK}`;
                 ctx.fillStyle = 'rgba(150,190,255,0.36)';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(`L${layer}`, p.x, p.y);
+                ctx.fillText(`L${layer}`, projected.x, projected.y);
             }
         }
 
-        // Lane rails (one per lane/layer group).
+        // Lane rails.
         const groups = new Map();
         for (const view of this.model.nodes) {
             const key = `${view.lane}:${view.layer}`;
@@ -1319,8 +1408,8 @@ export class SpatialView {
             groups.set(key, group);
         }
         for (const group of groups.values()) {
-            const x = group.lane * opts.laneGap;
-            const z = group.layer * opts.layerGap;
+            const x = group.lane * options.laneGap;
+            const z = group.layer * options.layerGap;
             line({ x, y: group.minY, z }, { x, y: group.maxY, z }, 'rgba(130,170,240,0.16)');
         }
     }
@@ -1479,22 +1568,22 @@ export class SpatialView {
         const options = this.model.options;
         const ts = options.turnSpacing;
         const laneGap = options.laneGap;
-        const laneDepths = new Map();
+        const laneYs = new Map();
         for (const view of this.model.nodes) {
             if (view.role === 'root') {
                 continue;
             }
             const key = `${view.lane}:${view.layer}`;
-            if (!laneDepths.has(key)) {
-                laneDepths.set(key, []);
+            if (!laneYs.has(key)) {
+                laneYs.set(key, []);
             }
-            laneDepths.get(key).push(view.displayDepth);
+            laneYs.get(key).push(view.y);
         }
 
         const clearance = ts * 0.35;
         const blocked = (lane, layer, y1, y2) => {
-            const depths = laneDepths.get(`${lane}:${layer}`);
-            if (!depths || !depths.length) {
+            const values = laneYs.get(`${lane}:${layer}`);
+            if (!values || !values.length) {
                 return false;
             }
             const lo = Math.min(y1, y2) + clearance;
@@ -1502,10 +1591,7 @@ export class SpatialView {
             if (lo >= hi) {
                 return false;
             }
-            return depths.some((depth) => {
-                const y = depth * ts;
-                return y > lo && y < hi;
-            });
+            return values.some((y) => y > lo && y < hi);
         };
 
         for (const edge of this.model.edges) {
@@ -1675,7 +1761,9 @@ export class SpatialView {
             entry.radius = radius + 4;
             entry.rect = null;
 
-            const turnLabel = `#${view.turn ?? view.displayDepth}`;
+            const turnLabel = this.model.options.timeMode === 'timestamp' && view.timeMin
+                ? formatTimeShort(view.timeMin)
+                : `#${view.turn ?? view.displayDepth}`;
 
             if (entry.scale < 2.8) {
                 ctx.font = `9px ${FONT_STACK}`;

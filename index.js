@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS = {
     spatialHideSystem: true,
     spatialShowAnchors: true,
     spatialShowMinimap: true,
+    spatialTimeMode: 'turn',
     spatialShowAllStrands: false,
     spatialAutoRotate: false,
 };
@@ -119,6 +120,7 @@ function loadSettings() {
         merged.spatialHideSystem = Boolean(merged.spatialHideSystem);
         merged.spatialShowAnchors = Boolean(merged.spatialShowAnchors);
         merged.spatialShowMinimap = Boolean(merged.spatialShowMinimap);
+        merged.spatialTimeMode = merged.spatialTimeMode === 'timestamp' ? 'timestamp' : 'turn';
         merged.spatialShowAllStrands = Boolean(merged.spatialShowAllStrands);
         merged.spatialAutoRotate = Boolean(merged.spatialAutoRotate);
 
@@ -608,6 +610,13 @@ function buildOverlay() {
                                 <option value="oldest">最早出现</option>
                             </select>
                         </label>
+                        <label class="ctv-option">
+                            <span>时间轴</span>
+                            <select class="ctv-select ctv-small-select" data-option="spatialTimeMode">
+                                <option value="turn">楼层</option>
+                                <option value="timestamp">真实时间</option>
+                            </select>
+                        </label>
                         <div class="ctv-option-group-title">空间视图</div>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialHideStructured" /> <span>隐藏预设 / 结构化消息</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialHideSystem" /> <span>隐藏系统消息</span></label>
@@ -770,7 +779,7 @@ function buildOverlay() {
 
             if (key === 'showColors' || key === 'activeVariantOnly' || key === 'compressChains') {
                 renderTree();
-            } else if (key === 'spatialHideStructured' || key === 'spatialHideSystem') {
+            } else if (key === 'spatialHideStructured' || key === 'spatialHideSystem' || key === 'spatialTimeMode') {
                 rebuildSpatialModel();
                 applyViewMode();
             } else if (key === 'spatialShowAnchors' || key === 'spatialShowMinimap' || key === 'spatialShowAllStrands' || key === 'spatialAutoRotate') {
@@ -1250,6 +1259,7 @@ function rebuildSpatialModel(options = {}) {
     state.spatialModel = buildSpatialModel(state.tree, state.chatInfo, {
         hideSystem: state.settings.spatialHideSystem,
         hideStructured: state.settings.spatialHideStructured,
+        timeMode: state.settings.spatialTimeMode,
         expandedSegments: state.expandedSegments,
     });
     if (state.spatial) {

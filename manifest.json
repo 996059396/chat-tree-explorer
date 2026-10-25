@@ -6,6 +6,6 @@
     "js": "index.js",
     "css": "style.css",
     "author": "TauriTavern Local",
-    "version": "3.2.0",
+    "version": "3.3.0",
     "description": "把某个角色卡的所有聊天记录合并成一棵 3D 轨道分支树：相同上文折叠为共享主干，不同选择分叉为支线，每次生成的 swipe 变成可切换的变体；带聊天指纹、关键词和结尾锚点，方便快速认出自己的聊天。"
 }

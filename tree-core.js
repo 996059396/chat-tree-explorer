@@ -50,6 +50,53 @@ const TAVERN_TEMPLATE_MARKERS = [
  * @param {string} text
  * @param {string} role
  */
+/**
+ * Parse SillyTavern's humanized send_date values. Returns 0 when unknown.
+ * Formats seen in practice:
+ *   "2025-11-15 @06h 13m 15s 123ms", "2025-11-15 06:13:15",
+ *   ISO strings, and date-only strings.
+ * @param {unknown} value
+ * @returns {number} epoch milliseconds (local time)
+ */
+export function parseSendDate(value) {
+    if (typeof value !== 'string') {
+        return 0;
+    }
+    const raw = value.trim();
+    if (!raw) {
+        return 0;
+    }
+    const direct = Date.parse(raw);
+    if (Number.isFinite(direct) && direct > 0) {
+        return direct;
+    }
+
+    let match = raw.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s*[@ ]?\s*(\d{1,2})h\s*(\d{1,2})m\s*(\d{1,2})s(?:\s*(\d{1,3})ms)?/i);
+    if (match) {
+        const [, year, month, day, hour, minute, second, ms] = match;
+        return new Date(
+            Number(year), Number(month) - 1, Number(day),
+            Number(hour), Number(minute), Number(second), Number(ms || 0),
+        ).getTime();
+    }
+
+    match = raw.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T@]+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+    if (match) {
+        const [, year, month, day, hour, minute, second] = match;
+        return new Date(
+            Number(year), Number(month) - 1, Number(day),
+            Number(hour), Number(minute), Number(second || 0), 0,
+        ).getTime();
+    }
+
+    match = raw.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (match) {
+        const [, year, month, day] = match;
+        return new Date(Number(year), Number(month) - 1, Number(day)).getTime();
+    }
+    return 0;
+}
+
 export function classifyMessage(text, role) {
     const raw = String(text ?? '');
     if (role === 'system') {
@@ -444,6 +491,7 @@ export function extractMessage(raw) {
         mes,
         name: typeof raw.name === 'string' ? raw.name : '',
         sendDate: typeof raw.send_date === 'string' ? raw.send_date : '',
+        sendEpoch: parseSendDate(raw.send_date),
         selectedKey,
         selectedNorm,
         variants,
@@ -531,6 +579,8 @@ function makeNode(role, parent) {
         richCount: 0,
         structured: false,
         rich: false,
+        timeMin: 0,
+        timeMax: 0,
     };
 }
 
@@ -672,7 +722,7 @@ function attachChild(parent, child) {
  * @param {string} chatKey
  * @param {number} messageIndex
  */
-function applyMessage(node, message, chatKey, messageIndex) {
+function applyMessage(node, message, chatKey, messageIndex, chatDate = 0) {
     node.chats.add(chatKey);
     if (messageIndex < node.minIndex) {
         node.minIndex = messageIndex;
@@ -690,6 +740,15 @@ function applyMessage(node, message, chatKey, messageIndex) {
     }
     if (message.rich) {
         node.richCount++;
+    }
+    const epoch = Number(message.sendEpoch) || Number(chatDate) || 0;
+    if (epoch > 0) {
+        if (!node.timeMin || epoch < node.timeMin) {
+            node.timeMin = epoch;
+        }
+        if (epoch > node.timeMax) {
+            node.timeMax = epoch;
+        }
     }
 
     let selectedKey = message.selectedKey;
@@ -783,7 +842,7 @@ export function buildChatTree(chats, options = {}) {
                 attachChild(current, node);
             }
 
-            const activeVariantKey = applyMessage(node, message, chatKey, index);
+            const activeVariantKey = applyMessage(node, message, chatKey, index, chat.date);
             node.lastActivity = Math.max(node.lastActivity, chat.date || 0);
 
             if (current !== root) {

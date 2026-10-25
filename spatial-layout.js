@@ -35,6 +35,8 @@ export const SPATIAL_DEFAULTS = Object.freeze({
     branchRadiusMaxFan: 10,
     goldenAngle: 2.399963229728653,
     layoutMode: 'lane', // 'lane' | 'radial'
+    timeMode: 'turn', // 'turn' | 'timestamp'
+    timeIdleGapTurns: 4,
     baseMode: 'per-chat', // radial mode: 'per-chat' | 'per-root'
     laneGap: 8,
     layerGap: 6,
@@ -102,6 +104,8 @@ function makeView(ref, parent) {
         structured: Boolean(ref.structured ?? classification.structured),
         textLength: variant ? variant.norm.length : 0,
         sender: ref.senderName || '',
+        timeMin: Number(ref.timeMin) || 0,
+        timeMax: Number(ref.timeMax) || 0,
         x: 0,
         y: 0,
         z: 0,
@@ -307,11 +311,19 @@ function makeSegment(run) {
     let displayLength = 0;
     let textLength = 0;
     let rich = false;
+    let timeMin = 0;
+    let timeMax = 0;
     for (const view of run) {
         variantCount += Math.max(1, view.variantCount || 1);
         displayLength += view.displayLength || 0;
         textLength += view.textLength || 0;
         rich = rich || Boolean(view.rich);
+        if (view.timeMin > 0 && (!timeMin || view.timeMin < timeMin)) {
+            timeMin = view.timeMin;
+        }
+        if (view.timeMax > timeMax) {
+            timeMax = view.timeMax;
+        }
     }
 
     const segment = {
@@ -334,6 +346,8 @@ function makeSegment(run) {
         rich,
         structured: false,
         sender: `↕ ${run.length} 层`,
+        timeMin,
+        timeMax,
         x: 0,
         y: 0,
         z: 0,
@@ -534,6 +548,79 @@ function assignLanePositions(rootView, options) {
     }
 }
 
+/**
+ * Optional time axis: Y = timestamp with idle-gap compression.
+ *
+ * The median gap between distinct timestamps maps to one turn spacing; any gap
+ * above `timeIdleGapTurns` is capped, so a chat resumed days later still sits a
+ * few rows below the previous message. Siblings sharing a timestamp share Y.
+ */
+function applyTimeAxis(rootView, options) {
+    if (!rootView) {
+        return;
+    }
+    const nodes = [];
+    const stack = [rootView];
+    while (stack.length) {
+        const view = stack.pop();
+        nodes.push(view);
+        for (const child of view.children) {
+            stack.push(child);
+        }
+    }
+
+    const times = Array.from(new Set(
+        nodes
+            .filter((view) => view.role !== 'root' && view.timeMin > 0)
+            .map((view) => view.timeMin),
+    )).sort((a, b) => a - b);
+    if (times.length < 2) {
+        return;
+    }
+
+    const gaps = [];
+    for (let index = 1; index < times.length; index++) {
+        const gap = times[index] - times[index - 1];
+        if (gap > 0) {
+            gaps.push(gap);
+        }
+    }
+    gaps.sort((a, b) => a - b);
+    const median = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 60_000;
+    const msPerRow = Math.max(1_000, median);
+    const scale = options.turnSpacing / msPerRow;
+    const maxGap = options.turnSpacing * Math.max(2, options.timeIdleGapTurns || 4);
+
+    const yOf = new Map();
+    let y = 0;
+    yOf.set(times[0], 0);
+    for (let index = 1; index < times.length; index++) {
+        const raw = (times[index] - times[index - 1]) * scale;
+        const gap = Math.min(Math.max(raw, options.turnSpacing * 0.08), maxGap);
+        y += gap;
+        yOf.set(times[index], y);
+    }
+
+    rootView.y = 0;
+    const stack2 = [rootView];
+    while (stack2.length) {
+        const parent = stack2.pop();
+        for (const child of parent.children) {
+            const time = child.timeMin;
+            let nextY = time > 0 && yOf.has(time)
+                ? yOf.get(time)
+                : parent.y + options.turnSpacing * 0.55;
+            // Clock anomalies / out-of-order timestamps must not lift a child
+            // above its parent.
+            if (parent !== rootView && time > 0 && parent.timeMin > 0 && time < parent.timeMin) {
+                nextY = parent.y + options.turnSpacing * 0.2;
+            }
+            child.y = Math.max(0, nextY);
+            stack2.push(child);
+        }
+    }
+}
+
 function compactLanes(rootView, options) {
     if (!rootView) {
         return;
@@ -594,7 +681,7 @@ export function buildSpatialModel(tree, chatInfo, options = {}) {
     const projected = projectTree(tree.root, opts);
     const rootView = projected.root;
 
-    if (rootView && opts.collapseChains) {
+    if (rootView && opts.collapseChains && opts.timeMode !== 'timestamp') {
         collapseLinearRuns(rootView, opts);
     }
     assignDisplayDepths(rootView);
@@ -606,6 +693,9 @@ export function buildSpatialModel(tree, chatInfo, options = {}) {
         if (opts.layoutMode === 'lane') {
             assignLanePositions(rootView, opts);
             compactLanes(rootView, opts);
+            if (opts.timeMode === 'timestamp') {
+                applyTimeAxis(rootView, opts);
+            }
         } else {
             assignPositions(rootView, bases, opts);
         }
