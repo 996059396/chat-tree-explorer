@@ -249,6 +249,7 @@ export class SpatialView {
         this.screenNodes = [];
         this.screenAnchors = [];
         this.applyVariantState();
+        this.computeEdgeRoutes();
         if (!options.preserveCamera && (!this._fitted || changed)) {
             this.fitInitial();
             this._fitted = true;
@@ -1409,26 +1410,27 @@ export class SpatialView {
             // Git-style routing: straight down within a lane, otherwise a
             // vertical stub → horizontal bend → vertical drop. This makes the
             // parent/child order readable from any camera angle.
-            const points = [];
-            if (parent.lane === child.lane && parent.layer === child.layer) {
-                points.push(
-                    { x: parent.x, y: parent.y, z: parent.z },
-                    { x: child.x, y: child.y, z: child.z },
-                );
-            } else {
-                // Fan the horizontal transition across the fork so sibling
-                // curves do not overlap at the same row (git-graph "lockedFirst"
-                // idea). The largest subtree stays near the source.
-                const ratio = child.siblingCount > 1
-                    ? 0.24 + 0.52 * ((child.branchIndex + 1) / (child.siblingCount + 1))
-                    : 0.45;
-                const midY = parent.y + (child.y - parent.y) * ratio;
-                points.push(
-                    { x: parent.x, y: parent.y, z: parent.z },
-                    { x: parent.x, y: midY, z: parent.z },
-                    { x: child.x, y: midY, z: child.z },
-                    { x: child.x, y: child.y, z: child.z },
-                );
+            let points = edge.route;
+            if (!points) {
+                // Fallback for an edge created after the last route pass.
+                points = [];
+                if (parent.lane === child.lane && parent.layer === child.layer) {
+                    points.push(
+                        { x: parent.x, y: parent.y, z: parent.z },
+                        { x: child.x, y: child.y, z: child.z },
+                    );
+                } else {
+                    const ratio = child.siblingCount > 1
+                        ? 0.24 + 0.52 * ((child.branchIndex + 1) / (child.siblingCount + 1))
+                        : 0.45;
+                    const midY = parent.y + (child.y - parent.y) * ratio;
+                    points.push(
+                        { x: parent.x, y: parent.y, z: parent.z },
+                        { x: parent.x, y: midY, z: parent.z },
+                        { x: child.x, y: midY, z: child.z },
+                        { x: child.x, y: child.y, z: child.z },
+                    );
+                }
             }
 
             const projected = points.map((point) => this.project(point, basis));
@@ -1460,6 +1462,109 @@ export class SpatialView {
             view = view.parent;
         }
         return set;
+    }
+
+    /**
+     * Precompute obstacle-aware orthogonal routes once per model.
+     *
+     * Nodes live on discrete (lane, layer, depth) coordinates. A vertical
+     * segment through an intermediate node is rerouted through a half-lane
+     * channel; horizontal transitions stay in the gap between two turn rows.
+     * This keeps long/skip edges from cutting through message beads.
+     */
+    computeEdgeRoutes() {
+        if (!this.model) {
+            return;
+        }
+        const options = this.model.options;
+        const ts = options.turnSpacing;
+        const laneGap = options.laneGap;
+        const laneDepths = new Map();
+        for (const view of this.model.nodes) {
+            if (view.role === 'root') {
+                continue;
+            }
+            const key = `${view.lane}:${view.layer}`;
+            if (!laneDepths.has(key)) {
+                laneDepths.set(key, []);
+            }
+            laneDepths.get(key).push(view.displayDepth);
+        }
+
+        const clearance = ts * 0.35;
+        const blocked = (lane, layer, y1, y2) => {
+            const depths = laneDepths.get(`${lane}:${layer}`);
+            if (!depths || !depths.length) {
+                return false;
+            }
+            const lo = Math.min(y1, y2) + clearance;
+            const hi = Math.max(y1, y2) - clearance;
+            if (lo >= hi) {
+                return false;
+            }
+            return depths.some((depth) => {
+                const y = depth * ts;
+                return y > lo && y < hi;
+            });
+        };
+
+        for (const edge of this.model.edges) {
+            const parent = edge.parent;
+            const child = edge.child;
+            const p0 = { x: parent.x, y: parent.y, z: parent.z };
+            const p3 = { x: child.x, y: child.y, z: child.z };
+            const same = parent.lane === child.lane && parent.layer === child.layer;
+            const ratio = child.siblingCount > 1
+                ? 0.24 + 0.52 * ((child.branchIndex + 1) / (child.siblingCount + 1))
+                : 0.45;
+            const midY = p0.y + (p3.y - p0.y) * ratio;
+
+            if (same) {
+                if (!blocked(parent.lane, parent.layer, p0.y, p3.y)) {
+                    edge.route = [p0, p3];
+                    continue;
+                }
+                const side = parent.lane <= 0 ? 1 : -1;
+                const channelX = p0.x + side * laneGap * 0.5;
+                const gap = Math.min(ts * 0.3, Math.abs(p3.y - p0.y) * 0.3);
+                edge.route = [
+                    p0,
+                    { x: p0.x, y: p0.y + gap, z: p0.z },
+                    { x: channelX, y: p0.y + gap, z: p0.z },
+                    { x: channelX, y: p3.y - gap, z: p3.z },
+                    { x: p3.x, y: p3.y - gap, z: p3.z },
+                    p3,
+                ];
+                continue;
+            }
+
+            const parentBlocked = blocked(parent.lane, parent.layer, p0.y, midY);
+            const childBlocked = blocked(child.lane, child.layer, midY, p3.y);
+            if (!parentBlocked && !childBlocked) {
+                edge.route = [
+                    p0,
+                    { x: p0.x, y: midY, z: p0.z },
+                    { x: p3.x, y: midY, z: p3.z },
+                    p3,
+                ];
+                continue;
+            }
+
+            const direction = Math.sign(p3.x - p0.x) || 1;
+            const parentChannelX = p0.x + direction * laneGap * 0.5;
+            const childChannelX = p3.x - direction * laneGap * 0.5;
+            const gap = Math.min(ts * 0.3, Math.abs(p3.y - p0.y) * 0.3);
+            edge.route = [
+                p0,
+                { x: p0.x, y: p0.y + gap, z: p0.z },
+                { x: parentChannelX, y: p0.y + gap, z: p0.z },
+                { x: parentChannelX, y: midY, z: p0.z },
+                { x: childChannelX, y: midY, z: p3.z },
+                { x: childChannelX, y: p3.y - gap, z: p3.z },
+                { x: p3.x, y: p3.y - gap, z: p3.z },
+                p3,
+            ];
+        }
     }
 
     drawStrands(ctx) {
