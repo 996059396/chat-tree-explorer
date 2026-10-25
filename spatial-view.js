@@ -228,6 +228,12 @@ export class SpatialView {
         this.screenNodes = [];
         this.screenAnchors = [];
         this.laneHeaders = [];
+        this.minimapStatic = document.createElement('canvas');
+        this.minimapStaticCtx = this.minimapStatic.getContext('2d');
+        this.minimapDirty = true;
+        this.axisCache = null;
+        this.densityCache = null;
+        this._framePathSet = null;
         this.starfield = null;
         this.resizeObserver = null;
         this.autoRotatePhase = 0;
@@ -269,6 +275,9 @@ export class SpatialView {
         this.screenAnchors = [];
         this.applyVariantState();
         this.computeEdgeRoutes();
+        this.minimapDirty = true;
+        this.axisCache = null;
+        this.densityCache = null;
         if (!options.preserveCamera && (!this._fitted || changed)) {
             this.fitInitial();
             this._fitted = true;
@@ -317,6 +326,7 @@ export class SpatialView {
 
     setSelected(nodeId) {
         this.selectedNodeId = nodeId || null;
+        this.minimapDirty = true;
         this.requestRender();
     }
 
@@ -335,6 +345,7 @@ export class SpatialView {
 
     setFocusChat(chatKey) {
         this.focusChatKey = chatKey || null;
+        this.minimapDirty = true;
         this.requestRender();
     }
 
@@ -725,7 +736,7 @@ export class SpatialView {
     renderMinimap() {
         const canvas = this.minimap;
         const ctx = this.minimapCtx;
-        if (!canvas || !ctx || !this.model) {
+        if (!canvas || !ctx) {
             return;
         }
         if (this.settings.showMinimap === false) {
@@ -737,13 +748,39 @@ export class SpatialView {
         const cssW = canvas.clientWidth || 200;
         const cssH = canvas.clientHeight || 130;
         const dpr = this.dpr;
-        if (canvas.width !== Math.floor(cssW * dpr) || canvas.height !== Math.floor(cssH * dpr)) {
-            canvas.width = Math.floor(cssW * dpr);
-            canvas.height = Math.floor(cssH * dpr);
+        const targetW = Math.floor(cssW * dpr);
+        const targetH = Math.floor(cssH * dpr);
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+            canvas.width = targetW;
+            canvas.height = targetH;
+            this.minimapStatic.width = targetW;
+            this.minimapStatic.height = targetH;
+            this.minimapDirty = true;
         }
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.clearRect(0, 0, cssW, cssH);
+        if (!this.model) {
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            return;
+        }
 
+        // The static layer only changes when the tree, selection or focus
+        // changes - camera moves just blit it and repaint the viewport.
+        if (this.minimapDirty) {
+            this.minimapDirty = false;
+            const staticCtx = this.minimapStaticCtx;
+            staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            staticCtx.clearRect(0, 0, cssW, cssH);
+            this.drawMinimapStatic(staticCtx, cssW, cssH);
+        }
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(this.minimapStatic, 0, 0);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        this.drawMinimapViewport(ctx);
+    }
+
+    drawMinimapStatic(ctx, cssW, cssH) {
         const bounds = this.model.bounds;
         const pad = 10;
         const worldW = Math.max(1, bounds.maxX - bounds.minX);
@@ -791,7 +828,7 @@ export class SpatialView {
             ctx.stroke();
         }
 
-        // Focused path (gold/chat colour) so the minimap doubles as a locator.
+        // Focused path so the minimap doubles as a locator.
         if (focus) {
             const path = this.model.chatPaths.get(focus);
             const info = this.chatInfo.get(focus);
@@ -848,8 +885,15 @@ export class SpatialView {
                 ctx.stroke();
             }
         }
+    }
 
-        // Viewport approximation.
+    drawMinimapViewport(ctx) {
+        if (!this.miniMap) {
+            return;
+        }
+        const { scale, ox, oy } = this.miniMap;
+        const mapX = (x) => ox + x * scale;
+        const mapY = (y) => oy + y * scale;
         const worldHeight = 2 * this.camera.distance * Math.tan(FOV / 2);
         const worldWidth = worldHeight * (this.width / Math.max(1, this.height));
         const cx = this.camera.target.x;
@@ -1186,6 +1230,7 @@ export class SpatialView {
         // Far to near for painter's algorithm.
         this.screenNodes.sort((a, b) => b.cz - a.cz);
 
+        this._framePathSet = this.selectedPathSet();
         this.drawEdges(ctx);
         this.drawStrands(ctx);
         this.drawNodes(ctx, focal);
@@ -1224,17 +1269,20 @@ export class SpatialView {
         const projectY = (y) => this.project({ x: 0, y, z: 0 }, basis);
 
         if (options.timeMode === 'timestamp') {
-            const byTime = new Map();
-            for (const view of this.model.nodes) {
-                if (view.role === 'root' || !view.timeMin) {
-                    continue;
+            if (!this.axisCache) {
+                const byTime = new Map();
+                for (const view of this.model.nodes) {
+                    if (view.role === 'root' || !view.timeMin) {
+                        continue;
+                    }
+                    const previous = byTime.get(view.timeMin);
+                    if (previous === undefined || view.y < previous) {
+                        byTime.set(view.timeMin, view.y);
+                    }
                 }
-                const previous = byTime.get(view.timeMin);
-                if (previous === undefined || view.y < previous) {
-                    byTime.set(view.timeMin, view.y);
-                }
+                this.axisCache = Array.from(byTime, ([time, y]) => ({ time, y })).sort((a, b) => a.y - b.y);
             }
-            const entries = Array.from(byTime, ([time, y]) => ({ time, y })).sort((a, b) => a.y - b.y);
+            const entries = this.axisCache;
             const ticks = [];
             let lastScreenY = -Infinity;
             for (const entry of entries) {
@@ -1266,28 +1314,31 @@ export class SpatialView {
 
     drawDensity(ctx, basis) {
         const { minY, maxY } = this.model.bounds;
-        const span = Math.max(1, maxY - minY);
         const bucketCount = 48;
-        const counts = new Array(bucketCount).fill(0);
-        for (const view of this.model.nodes) {
-            if (view.role === 'root') {
-                continue;
+        if (!this.densityCache) {
+            const span = Math.max(1, maxY - minY);
+            const counts = new Array(bucketCount).fill(0);
+            for (const view of this.model.nodes) {
+                if (view.role === 'root') {
+                    continue;
+                }
+                const index = Math.min(
+                    bucketCount - 1,
+                    Math.max(0, Math.floor(((view.y - minY) / span) * bucketCount)),
+                );
+                const weight = view.segmentNodes
+                    ? Math.max(1, view.segmentCount)
+                    : Math.max(1, view.ref.occurrences?.length || 1);
+                counts[index] += weight;
             }
-            const index = Math.min(
-                bucketCount - 1,
-                Math.max(0, Math.floor(((view.y - minY) / span) * bucketCount)),
-            );
-            const weight = view.segmentNodes
-                ? Math.max(1, view.segmentCount)
-                : Math.max(1, view.ref.occurrences?.length || 1);
-            counts[index] += weight;
+            this.densityCache = { counts, max: Math.max(1, ...counts), minY, span };
         }
-        const max = Math.max(1, ...counts);
+        const { counts, max, minY: cacheMinY, span } = this.densityCache;
         for (let index = 0; index < bucketCount; index++) {
             if (!counts[index]) {
                 continue;
             }
-            const y = minY + ((index + 0.5) / bucketCount) * span;
+            const y = cacheMinY + ((index + 0.5) / bucketCount) * span;
             const projected = this.project({ x: 0, y, z: 0 }, basis);
             if (!projected || projected.y < 0 || projected.y > this.height) {
                 continue;
@@ -1459,7 +1510,7 @@ export class SpatialView {
 
     drawEdges(ctx) {
         const focus = this.focusChatKey;
-        const selectedPath = this.selectedPathSet();
+        const selectedPath = this._framePathSet || this.selectedPathSet();
         const basis = this.basis();
 
         const arrow = (a, b, style, width) => {
@@ -1784,6 +1835,9 @@ export class SpatialView {
                 ? formatTimeShort(view.timeMin)
                 : `#${view.turn ?? view.displayDepth}`;
 
+            if (entry.scale < 1.2) {
+                continue;
+            }
             if (entry.scale < 2.8) {
                 ctx.font = `9px ${FONT_STACK}`;
                 ctx.fillStyle = `rgba(190,210,240,${0.55 * alpha})`;
@@ -1823,9 +1877,14 @@ export class SpatialView {
     tagRect(item) {
         const { entry, view } = item;
         const side = (view.lane ?? 0) >= 0 ? 1 : -1;
-        const width = clamp(110 + entry.scale * 2.4, 100, 200);
-        const twoLines = entry.scale > 8 || item.selected || item.hovered;
-        const height = twoLines ? 40 : 24;
+        const full = item.selected || item.hovered || entry.scale >= 9;
+        const twoLines = full || entry.scale >= 5.5;
+        const width = full
+            ? clamp(150 + entry.scale * 4, 170, 240)
+            : twoLines
+                ? clamp(116 + entry.scale * 3, 120, 190)
+                : clamp(94 + entry.scale * 4, 100, 140);
+        const height = full ? 44 : twoLines ? 34 : 24;
         const x = side > 0 ? entry.x + entry.radius + 6 : entry.x - entry.radius - 6 - width;
         // Stagger labels above/below the bead so adjacent lanes can both show
         // a label without overlapping.
@@ -1878,7 +1937,7 @@ export class SpatialView {
 
         const pad = 6;
         ctx.textBaseline = 'top';
-        ctx.font = `600 10px ${FONT_STACK}`;
+        ctx.font = `600 ${h >= 40 ? 10.5 : 9.5}px ${FONT_STACK}`;
         ctx.fillStyle = `rgba(230,240,255,${0.95 * alpha})`;
         const sender = view.sender || ROLE_LABEL[view.role] || view.role;
         ctx.fillText(
@@ -1900,7 +1959,7 @@ export class SpatialView {
         if (view.segmentNodes) {
             badges.push('＋');
         }
-        if (badges.length && w > 150) {
+        if (badges.length && w > 150 && h >= 34) {
             ctx.font = `8.5px ${FONT_STACK}`;
             ctx.fillStyle = `rgba(170,200,245,${0.72 * alpha})`;
             const badgeText = badges.join('·');
@@ -1910,11 +1969,11 @@ export class SpatialView {
 
         const text = String(view.displayText || view.text || '').replace(/\s+/g, ' ').trim();
         const lines = tag.twoLines ? 2 : 1;
-        const bodySize = 9;
+        const bodySize = h >= 40 ? 9.5 : 8.6;
         const lineHeight = bodySize * 1.2;
         const chars = Array.from(text);
         let shown = 0;
-        let cursorY = y + 4 + 10 + 1;
+        let cursorY = y + 3 + (h >= 40 ? 10.5 : 9.5) + 1;
         for (let line = 0; line < lines && shown < chars.length; line++) {
             const fitted = fitText(ctx, chars.slice(shown).join(''), w - pad * 2 - 3, this.textCache);
             if (!fitted) {
@@ -1931,7 +1990,7 @@ export class SpatialView {
             }
         }
 
-        if (h >= 40 && w > 90) {
+        if (h >= 36 && w > 100) {
             const hues = textFeatureHues(text, 8);
             const cell = 3.5;
             let sx = x + pad + 3;
