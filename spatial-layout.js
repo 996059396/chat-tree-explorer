@@ -35,6 +35,7 @@ export const SPATIAL_DEFAULTS = Object.freeze({
     branchRadiusMaxFan: 10,
     goldenAngle: 2.399963229728653,
     layoutMode: 'lane', // 'lane' | 'radial'
+    laneScope: 'layer', // 'layer' | 'global'
     timeMode: 'turn', // 'turn' | 'timestamp'
     timeIdleGapTurns: 4,
     baseMode: 'per-chat', // radial mode: 'per-chat' | 'per-root'
@@ -502,7 +503,8 @@ function assignLanePositions(rootView, options) {
     rootView.y = 0;
     rootView.z = 0;
 
-    const laneEnds = new Map([[0, rootView._subtreeMax]]);
+    const laneKey = (layer, lane) => (options.laneScope === 'layer' ? `${layer}:${lane}` : `g:${lane}`);
+    const laneEnds = new Map([[laneKey(0, 0), rootView._subtreeMax]]);
     const queue = [rootView];
 
     for (let cursor = 0; cursor < queue.length; cursor++) {
@@ -519,10 +521,11 @@ function assignLanePositions(rootView, options) {
                 child.lane = parent.lane;
                 child.layer = parent.layer;
             } else {
+                child.layer = parent.layer + 1;
                 let lane = null;
                 for (let offset = 1; offset < 256 && lane === null; offset++) {
                     for (const candidate of [parent.lane + offset, parent.lane - offset]) {
-                        const end = laneEnds.get(candidate);
+                        const end = laneEnds.get(laneKey(child.layer, candidate));
                         if (end === undefined || end < child.displayDepth) {
                             lane = candidate;
                             break;
@@ -532,9 +535,15 @@ function assignLanePositions(rootView, options) {
                 if (lane === null) {
                     lane = parent.lane + 1;
                 }
-                laneEnds.set(lane, child._subtreeMax);
+                laneEnds.set(laneKey(child.layer, lane), child._subtreeMax);
                 child.lane = lane;
-                child.layer = parent.layer + 1;
+            }
+            if (options.laneScope === 'layer') {
+                const key = laneKey(child.layer, child.lane);
+                const end = laneEnds.get(key);
+                if (end === undefined || end < child._subtreeMax) {
+                    laneEnds.set(key, child._subtreeMax);
+                }
             }
 
             child.turn = child.displayDepth;

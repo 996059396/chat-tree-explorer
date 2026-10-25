@@ -36,6 +36,7 @@ const DEFAULT_SETTINGS = {
     spatialShowAnchors: true,
     spatialShowMinimap: true,
     spatialTimeMode: 'turn',
+    spatialLaneScope: 'layer',
     spatialShowAllStrands: false,
     spatialAutoRotate: false,
 };
@@ -121,6 +122,7 @@ function loadSettings() {
         merged.spatialShowAnchors = Boolean(merged.spatialShowAnchors);
         merged.spatialShowMinimap = Boolean(merged.spatialShowMinimap);
         merged.spatialTimeMode = merged.spatialTimeMode === 'timestamp' ? 'timestamp' : 'turn';
+        merged.spatialLaneScope = merged.spatialLaneScope === 'global' ? 'global' : 'layer';
         merged.spatialShowAllStrands = Boolean(merged.spatialShowAllStrands);
         merged.spatialAutoRotate = Boolean(merged.spatialAutoRotate);
 
@@ -617,6 +619,13 @@ function buildOverlay() {
                                 <option value="timestamp">真实时间</option>
                             </select>
                         </label>
+                        <label class="ctv-option">
+                            <span>车道范围</span>
+                            <select class="ctv-select ctv-small-select" data-option="spatialLaneScope">
+                                <option value="layer">每层独立</option>
+                                <option value="global">全局复用</option>
+                            </select>
+                        </label>
                         <div class="ctv-option-group-title">空间视图</div>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialHideStructured" /> <span>隐藏预设 / 结构化消息</span></label>
                         <label class="ctv-option"><input type="checkbox" data-option="spatialHideSystem" /> <span>隐藏系统消息</span></label>
@@ -779,7 +788,7 @@ function buildOverlay() {
 
             if (key === 'showColors' || key === 'activeVariantOnly' || key === 'compressChains') {
                 renderTree();
-            } else if (key === 'spatialHideStructured' || key === 'spatialHideSystem' || key === 'spatialTimeMode') {
+            } else if (key === 'spatialHideStructured' || key === 'spatialHideSystem' || key === 'spatialTimeMode' || key === 'spatialLaneScope') {
                 rebuildSpatialModel();
                 applyViewMode();
             } else if (key === 'spatialShowAnchors' || key === 'spatialShowMinimap' || key === 'spatialShowAllStrands' || key === 'spatialAutoRotate') {
@@ -1260,6 +1269,7 @@ function rebuildSpatialModel(options = {}) {
         hideSystem: state.settings.spatialHideSystem,
         hideStructured: state.settings.spatialHideStructured,
         timeMode: state.settings.spatialTimeMode,
+        laneScope: state.settings.spatialLaneScope,
         expandedSegments: state.expandedSegments,
     });
     if (state.spatial) {
